@@ -1,0 +1,115 @@
+:root {
+  --theme-color: #2f6bff;
+  --main-color: #2f6bff;
+  --default-bg-color: #f5f7fa;
+  --default-box-color: #fff;
+  --default-border: #e7e9ee;
+  --art-card-border: #e7e9ee;
+  --art-gray-200: #eef0f4;
+  --art-gray-300: #d9dce3;
+  --art-gray-700: #4b5563;
+  --custom-radius: 4px;
+}
+html, body, #app { min-width: 320px; min-height: 100%; margin: 0; }
+body { color: #20242c; background: var(--default-bg-color); font-family: Inter, "Microsoft YaHei", sans-serif; }
+.auth-shell { min-height: 100vh; display: grid; grid-template-columns: minmax(320px, 42%) 1fr; position: relative; background: #fff; }
+.auth-brand { display: flex; align-items: center; justify-content: center; gap: 18px; color: #fff; background: #202b3c; }
+.auth-brand h1 { margin: 0; font-size: 32px; letter-spacing: 0; }.auth-brand p { margin: 8px 0 0; color: #c5cedb; }
+.brand-mark { width: 62px; height: 62px; display: grid; place-items: center; border-radius: 8px; color: white; background: #cf3039; font-size: 30px; font-weight: 800; }
+.brand-mark.small { width: 34px; height: 34px; font-size: 18px; }
+.auth-right-wrap { display: grid; place-items: center; padding: 48px; }
+.auth-right-wrap .form { width: min(400px, 100%); padding: 36px; box-sizing: border-box; }.form .title { font-size: 28px; margin-bottom: 8px; }.form .sub-title { margin-bottom: 28px; }
+.form .el-button { width: 100%; }.custom-height { min-height: 42px; }
+.layout-shell { height: 100vh; display: grid; grid-template-columns: 236px 1fr; }.layout-sidebar { background: #202b3c; color: #fff; padding: 18px 14px; display: flex; flex-direction: column; }
+.sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 0 6px 24px; }.layout-sidebar nav { display: grid; gap: 6px; }.layout-sidebar nav a { padding: 12px 14px; color: #cbd3de; text-decoration: none; border-radius: 6px; }.layout-sidebar nav a.active, .layout-sidebar nav a:hover { color: white; background: #344257; }
+.layout-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }.top-bar { height: 64px; flex: 0 0 auto; display: flex; align-items: center; padding: 0 28px; background: #fff; border-bottom: 1px solid var(--default-border); }
+.top-bar-clock { margin-left: auto; color: #657084; font-size: 14px; font-variant-numeric: tabular-nums; }
+.page-area { flex: 1; min-height: 0; overflow: hidden; padding: 28px; display: flex; }.page-content { width: 100%; min-height: 260px; padding: 28px; background: #fff; box-sizing: border-box; }.page-content h1, .page-content h2 { margin-top: 0; }.password-form { width: min(540px, 100%); min-height: auto; }
+.site-footer { padding: 16px 24px; text-align: center; color: #7b8492; font-size: 13px; }.site-footer a { color: #4b67a1; text-decoration: none; }
+.auth-shell > .site-footer { position: absolute; left: 42%; right: 0; bottom: 8px; }
+@media (max-width: 760px) { .auth-shell { display: block; padding-top: 130px; }.auth-brand { position: absolute; inset: 0 0 auto; height: 130px; }.auth-brand h1 { font-size: 24px; }.auth-right-wrap { padding: 28px 18px 72px; }.auth-shell > .site-footer { left: 0; }.layout-shell { grid-template-columns: 72px 1fr; }.sidebar-brand strong { display: none; }.layout-sidebar nav a { padding: 10px 5px; font-size: 13px; text-align: center; }.page-area { padding: 16px; } }
+
+/* ── Semester management ── */
+.semester-detail { padding-top: 16px; }
+.semester-info p { margin: 8px 0; font-size: 15px; }
+.semester-info .label { color: var(--art-gray-700); min-width: 140px; display: inline-block; }
+.semester-actions { display: flex; gap: 10px; margin-top: 18px; }
+
+/* ── Semester toolbar ── */
+.semester-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.semester-title { margin: 0; font-size: 20px; font-weight: 600; color: #20242c; }
+
+.deductions-page-content { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.deductions-table-wrap { flex: 1 1 auto; width: 100%; min-height: 0; overflow-x: auto; overflow-y: auto; }
+.deductions-table-wrap .el-table { min-width: 100%; }
+.students-page-content { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.students-table-wrap { flex: 1 1 auto; width: 100%; min-height: 0; overflow-x: auto; overflow-y: auto; }
+.students-table-wrap .el-table { min-width: 100%; }
+.batch-delete-preview { border-top: 1px solid var(--default-border); padding-top: 16px; }
+.batch-delete-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+
+/* ── Workspace overview ── */
+.workspace-page { padding: 0; background: transparent; }
+.workspace-heading { padding: 6px 0 28px; }
+.workspace-heading h1 { margin: 0; font-size: 30px; font-weight: 650; color: #20242c; }
+.workspace-heading p { margin: 9px 0 0; color: #7b8492; font-size: 14px; }
+.workspace-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+.workspace-stat-card { min-height: 178px; padding: 24px; box-sizing: border-box; border: 1px solid var(--art-card-border); border-radius: 6px; background: #fff; display: flex; flex-direction: column; }
+.workspace-card-button { width: 100%; text-align: left; font-family: inherit; cursor: pointer; }
+.workspace-card-button:hover { border-color: #aebbd3; background: #fbfcff; }
+.workspace-stat-label { color: #657084; font-size: 14px; }
+.workspace-stat-card strong { margin-top: 18px; color: #20242c; font-size: 36px; font-weight: 650; line-height: 1; }
+.workspace-stat-card small { margin-top: auto; color: #8b95a7; font-size: 13px; }
+.workspace-stat-card.stat-blue { border-top: 3px solid #2f6bff; }
+.workspace-stat-card.stat-green { border-top: 3px solid #28a57a; }
+.workspace-stat-card.stat-orange { border-top: 3px solid #dc8b24; }
+.workspace-stat-card.stat-red { border-top: 3px solid #d74b58; }
+.workspace-stat-card.stat-slate { border-top: 3px solid #52667c; }
+.workspace-stat-card.current-semester-card { border-top: 3px solid #6c5ccf; }
+.workspace-stat-card.duty-dorm-card { border-top: 3px solid #198c9c; }
+.workspace-record-section + .workspace-record-section { margin-top: 22px; }
+.workspace-record-section h3 { margin: 0 0 10px; font-size: 15px; }
+
+/* ── Daily management ── */
+.daily-management-page { height: 100%; min-height: 0; padding: 0; background: transparent; display: flex; flex-direction: column; overflow: hidden; }
+.daily-semester-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.daily-semester-card { min-height: 160px; padding: 22px; border: 1px solid var(--art-card-border); border-top: 3px solid #2f6bff; border-radius: 6px; background: #fff; color: #20242c; text-align: left; font-family: inherit; cursor: pointer; display: flex; flex-direction: column; }
+.daily-semester-card:hover { border-color: #9eb6ed; background: #fbfcff; }
+.daily-semester-card span { color: #657084; font-size: 14px; }
+.daily-semester-card strong { margin-top: 16px; font-size: 23px; font-weight: 650; }
+.daily-semester-card small { margin-top: auto; color: #8b95a7; font-size: 13px; }
+.daily-management-empty { min-height: 180px; display: grid; place-items: center; border: 1px dashed var(--art-card-border); color: #8b95a7; background: #fff; }
+.daily-detail-date { margin: 8px 0 0; color: #7b8492; font-size: 14px; }
+.daily-management-page > .semester-toolbar { flex: 0 0 auto; }
+.daily-management-detail { min-height: 0; flex: 1; display: grid; grid-template-columns: 190px minmax(0, 1fr); border: 1px solid var(--art-card-border); background: #fff; overflow: hidden; }
+.daily-week-list { overflow-y: auto; padding: 10px; border-right: 1px solid var(--art-card-border); background: #fafbfc; display: flex; flex-direction: column; gap: 6px; }
+.daily-week-list button { min-height: 62px; padding: 9px 10px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #303846; text-align: left; font-family: inherit; cursor: pointer; }
+.daily-week-list button:hover, .daily-week-list button.active { border-color: #b8c9ef; background: #edf3ff; color: #2459bf; }
+.daily-week-list small { display: block; margin-top: 5px; color: #7b8492; font-size: 12px; }
+.daily-score-table-wrap { min-width: 0; overflow: auto; padding: 12px; }
+.daily-score-table-wrap .el-table { min-width: max-content; }
+.daily-discipline-list { margin-bottom: 12px; padding: 10px 12px; border-left: 3px solid #d74b58; background: #fff4f4; color: #7c2f37; }
+.daily-score-table-wrap .el-table .daily-score-highlight td { background: #fff1f0 !important; }
+@media (max-width: 900px) { .daily-semester-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .daily-semester-grid { grid-template-columns: 1fr; }.daily-management-detail { grid-template-columns: 145px minmax(0, 1fr); }.daily-week-list { padding: 7px; } }
+
+/* ── Dorm ordering ── */
+.dorm-order-list { max-height: 420px; overflow-y: auto; border: 1px solid var(--default-border); }
+.dorm-order-item { min-height: 48px; padding: 0 14px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--default-border); cursor: grab; user-select: none; background: #fff; }
+.dorm-order-item:last-child { border-bottom: 0; }
+.dorm-order-item:active { cursor: grabbing; background: #f5f8ff; }
+.dorm-order-index { width: 24px; color: #657084; font-variant-numeric: tabular-nums; }
+.dorm-drag-hint { margin-left: auto; color: #8b95a7; font-size: 13px; }
+@media (max-width: 1100px) { .workspace-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .workspace-stat-grid { grid-template-columns: 1fr; }.workspace-heading h1 { font-size: 26px; } }
+
+/* ── Collapse cards ── */
+.collapse-title { font-weight: 600; font-size: 15px; }
+.collapse-date { margin-left: 16px; font-size: 13px; color: var(--art-gray-700); }
+.sidebar-spacer { flex: 1; }
+.sidebar-logout {
+  color: #f56c6c !important;
+  margin: 0 6px 4px;
+  justify-content: flex-start;
+}
+.sidebar-logout:hover { color: #f56c6c !important; }
