@@ -1,7 +1,5 @@
 # 纪检工作台 / PoliceStyleWorkspace
 
-# **纪检工作台 / PoliceStyleWorkspace**
-
 纪检工作台是一个面向警务化管理日常工作和扣分记录维护的本地化桌面 Web 应用。项目由 Go 单体服务、内嵌 Vue 前端和 EUI\-NEO Windows GUI 管理端组成，运行数据默认保存在发布目录内。
 
 ## **功能**
