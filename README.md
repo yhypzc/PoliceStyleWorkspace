@@ -54,7 +54,13 @@
 
 寝室信息支持可选手机号，用于每日播报中钉钉机器人真实 `atMobiles` @ 寝室长。
 
-每日播报主流程在 `handlers/daily_report_scheduler.go`：
+每日播报主流程在 `handlers/daily_report_scheduler.go` ，到达配置的每日播报时间后，系统会自动：
+1. 登录 VPN。
+2. 登录内网警务化管理系统。
+3. 抓取指定日期的扣分记录和未指定记录。
+4. 生成播报文本。
+5. 发送到启用的钉钉机器人。
+6. 保存播报日志和抓取原始数据。
 
 - `StartDailyReportScheduler` 每秒检查配置时间；到达时间后使用 `daily_report_auto_run.run_key` 保证同一天同一时间只自动执行一次。
 
@@ -119,6 +125,17 @@ API 鉴权：
 - VPN 密码、内网密码、钉钉 Webhook URL、钉钉加签密钥在数据库中保存真实值。
 
 - 接口返回配置和机器人列表时只返回脱敏值；用户提交保存时仍写入真实值。相关处理在 `handlers/daily_report.go` 和 `models/daily_report.go`。
+
+- 运行目录中的常用文件：
+
+```text
+databases/police_style.db   数据库
+config/                     配置文件
+log/server.log              服务端日志
+scripts/server-watchdog.vbs GUI 服务监控脚本
+```
+
+建议定期备份 `databases/police_style.db` 和 `log/server.log`。
 
 ## **数据库**
 
