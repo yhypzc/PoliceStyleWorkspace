@@ -47,109 +47,11 @@ func CreateDailyReportTables(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	// Upgrade databases created before robot_name was introduced.
-	var robotPK int
-	_ = db.QueryRow(`SELECT COALESCE((SELECT pk FROM pragma_table_info('dingtalk_webbook_robots') WHERE name='robot_name'),0)`).Scan(&robotPK)
-	if robotPK != 1 {
-		_, _ = db.Exec(`ALTER TABLE dingtalk_webbook_robots RENAME TO dingtalk_webbook_robots_legacy`)
-		_, _ = db.Exec(`CREATE TABLE dingtalk_webbook_robots(robot_name TEXT PRIMARY KEY, dingtalk_webbook_url BLOB, dingtalk_webbook_password BLOB, set_status INT, aes_key BLOB, FOREIGN KEY(aes_key) REFERENCES daily_report_config(aes_key))`)
-		_, _ = db.Exec(`INSERT OR IGNORE INTO dingtalk_webbook_robots(robot_name,dingtalk_webbook_url,dingtalk_webbook_password,set_status,aes_key) SELECT COALESCE(robot_name,'legacy'),dingtalk_webbook_url,dingtalk_webbook_password,set_status,aes_key FROM dingtalk_webbook_robots_legacy`)
-		_, _ = db.Exec(`DROP TABLE dingtalk_webbook_robots_legacy`)
-	}
-	return migrateDailyReportLog(db)
+	_, err = db.Exec(createDailyReportLogSQL)
+	return err
 }
 
-func migrateDailyReportLog(db *sql.DB) error {
-	exists, err := tableExists(db, "daily_report_log")
-	if err != nil {
-		return err
-	}
-	if !exists {
-		_, err = db.Exec(createDailyReportLogSQL)
-		return err
-	}
-
-	columns, err := tableColumns(db, "daily_report_log")
-	if err != nil {
-		return err
-	}
-	if dailyReportLogSchemaCurrent(db, columns) {
-		return nil
-	}
-	selects := []string{
-		columnOrEmpty(columns, "op_time"),
-		columnOrEmpty(columns, "op_status"),
-		columnOrEmpty(columns, "fetch_content"),
-		columnOrEmpty(columns, "robot_name"),
-		columnOrEmpty(columns, "raw_id"),
-		columnOrEmpty(columns, "response_raw"),
-	}
-	rows, err := db.Query(`SELECT ` + selects[0] + `,` + selects[1] + `,` + selects[2] + `,` + selects[3] + `,` + selects[4] + `,` + selects[5] + ` FROM daily_report_log ORDER BY rowid`)
-	if err != nil {
-		return err
-	}
-	oldLogs := []DailyReportLog{}
-	for rows.Next() {
-		var opTime, opStatus, fetchContent, robotName, rawID, responseRaw sql.NullString
-		if err := rows.Scan(&opTime, &opStatus, &fetchContent, &robotName, &rawID, &responseRaw); err != nil {
-			rows.Close()
-			return err
-		}
-		oldLogs = append(oldLogs, DailyReportLog{
-			OpTime:       opTime.String,
-			OpStatus:     opStatus.String,
-			FetchContent: fetchContent.String,
-			RobotName:    robotName.String,
-			RawID:        rawID.String,
-			ResponseRaw:  responseRaw.String,
-		})
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		return err
-	}
-	defer db.Exec(`PRAGMA foreign_keys=ON`)
-
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.Exec(`DROP TABLE daily_report_log`); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(createDailyReportLogSQL); err != nil {
-		return err
-	}
-	for _, item := range oldLogs {
-		rawID := item.RawID
-		if rawID == "" && item.ResponseRaw != "" {
-			rawID = DailyReportRawID(item.ResponseRaw)
-		}
-		if item.ResponseRaw != "" {
-			if _, err := tx.Exec(`INSERT OR IGNORE INTO daily_report_cache(id,response_raw) VALUES(?,?)`, rawID, item.ResponseRaw); err != nil {
-				return err
-			}
-		}
-		if _, err := tx.Exec(
-			`INSERT OR REPLACE INTO daily_report_log(op_time,op_status,fetch_content,robot_name,raw_id) VALUES(?,?,?,?,?)`,
-			item.OpTime,
-			item.OpStatus,
-			item.FetchContent,
-			nullableString(item.RobotName),
-			nullableString(rawID),
-		); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-const createDailyReportLogSQL = `CREATE TABLE daily_report_log(
+const createDailyReportLogSQL = `CREATE TABLE IF NOT EXISTS daily_report_log(
 	op_time TEXT,
 	op_status TEXT,
 	fetch_content TEXT,
@@ -160,72 +62,6 @@ const createDailyReportLogSQL = `CREATE TABLE daily_report_log(
 	FOREIGN KEY(raw_id) REFERENCES daily_report_cache(id)
 )`
 
-func dailyReportLogSchemaCurrent(db *sql.DB, columns map[string]bool) bool {
-	for _, name := range []string{"op_time", "op_status", "fetch_content", "robot_name", "raw_id"} {
-		if !columns[name] {
-			return false
-		}
-	}
-	if columns["response_raw"] {
-		return false
-	}
-	foreignKeys, err := dailyReportLogForeignKeyTargets(db)
-	if err != nil {
-		return false
-	}
-	return foreignKeys["dingtalk_webbook_robots"] && foreignKeys["daily_report_cache"]
-}
-
-func dailyReportLogForeignKeyTargets(db *sql.DB) (map[string]bool, error) {
-	rows, err := db.Query(`PRAGMA foreign_key_list(daily_report_log)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	targets := map[string]bool{}
-	for rows.Next() {
-		var id, seq int
-		var tableName, from, to, onUpdate, onDelete, match string
-		if err := rows.Scan(&id, &seq, &tableName, &from, &to, &onUpdate, &onDelete, &match); err != nil {
-			return nil, err
-		}
-		targets[tableName] = true
-	}
-	return targets, rows.Err()
-}
-
-func tableExists(db *sql.DB, name string) (bool, error) {
-	var count int
-	err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&count)
-	return count > 0, err
-}
-
-func tableColumns(db *sql.DB, name string) (map[string]bool, error) {
-	rows, err := db.Query(`PRAGMA table_info(` + name + `)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	columns := map[string]bool{}
-	for rows.Next() {
-		var cid int
-		var columnName, columnType string
-		var notNull, pk int
-		var defaultValue any
-		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &pk); err != nil {
-			return nil, err
-		}
-		columns[columnName] = true
-	}
-	return columns, rows.Err()
-}
-
-func columnOrEmpty(columns map[string]bool, name string) string {
-	if columns[name] {
-		return name
-	}
-	return `''`
-}
 func reportKey(db *sql.DB) ([]byte, error) {
 	var key []byte
 	err := db.QueryRow(`SELECT aes_key FROM daily_report_config LIMIT 1`).Scan(&key)

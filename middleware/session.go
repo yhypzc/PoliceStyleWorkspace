@@ -127,11 +127,18 @@ func RequireAuth(store *SessionStore, next http.Handler) http.Handler {
 			_, _ = w.Write([]byte(`{"ok":false,"error":"unauthorized"}`))
 			return
 		}
-		if requiresCSRFCheck(r.Method) && r.Header.Get(CSRFTokenHeaderName) != session.CSRFToken {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = w.Write([]byte(`{"ok":false,"error":"csrf token invalid"}`))
-			return
+		if requiresCSRFCheck(r.Method) {
+			headerToken := r.Header.Get(CSRFTokenHeaderName)
+			cookieToken := ""
+			if c, err := r.Cookie(CSRFTokenCookieName); err == nil {
+				cookieToken = c.Value
+			}
+			if headerToken != session.CSRFToken && cookieToken != session.CSRFToken {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"ok":false,"error":"csrf token invalid"}`))
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

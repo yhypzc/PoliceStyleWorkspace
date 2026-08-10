@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"strings"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -792,3 +793,172 @@ func (a *App) setCurrentDutyDorm(stats *struct {
 	}
 	return nil
 }
+
+
+func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request) {
+	semester, err := models.GetSemester(a.DB, r.PathValue("name"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	weekIndex, err := strconv.Atoi(r.PathValue("week"))
+	if err != nil || weekIndex < 0 {
+		writeError(w, http.StatusBadRequest, "周序号无效")
+		return
+	}
+	start, end, ok := semesterRange(*semester)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "学期日期无效")
+		return
+	}
+	weekStart := start.AddDate(0, 0, weekIndex*7)
+	if !weekStart.Before(end) {
+		writeError(w, http.StatusBadRequest, "周序号超出学期范围")
+		return
+	}
+	weekEnd := weekStart.AddDate(0, 0, 7)
+	if weekEnd.After(end) {
+		weekEnd = end
+	}
+
+	students, err := models.ListStudents(a.DB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	names := make(map[string]string, len(students))
+	for _, s := range students {
+		names[s.ID] = s.Name
+	}
+
+	// 查询常规扣分记录
+	type singleRecord struct {
+		ID          string   `json:"id"`
+		Date        string   `json:"date"`
+		Content     string   `json:"content"`
+		Score       float64  `json:"score"`
+		StudentIDs  []string `json:"student_ids"`
+		StudentNames string  `json:"student_names"`
+	}
+	singleRows, err := a.DB.Query(`
+		SELECT r.id, r.submit_date, r.content, r.score, GROUP_CONCAT(o.student_id, ','), GROUP_CONCAT(s.stu_name, ',')
+		FROM police_style_records_single_subrecords r
+		JOIN ownership_single_subrecords o ON o.record_id = r.id
+		JOIN students s ON s.id = o.student_id
+		WHERE r.submit_date >= ? AND r.submit_date < ?
+		GROUP BY r.id
+		ORDER BY r.submit_date, r.id`,
+		weekStart.Format("2006-01-02 15:04:05"), weekEnd.Format("2006-01-02 15:04:05"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "查询常规扣分记录失败: "+err.Error())
+		return
+	}
+	defer singleRows.Close()
+	var singleRecords []singleRecord
+	for singleRows.Next() {
+		var id, date, content, idsStr, namesStr string
+		var score float64
+		if err := singleRows.Scan(&id, &date, &content, &score, &idsStr, &namesStr); err != nil {
+			writeError(w, http.StatusInternalServerError, "读取常规扣分记录失败: "+err.Error())
+			return
+		}
+		studentIDs := strings.Split(idsStr, ",")
+		studentNames := namesStr
+		if idsStr == "" {
+			studentIDs = nil
+		}
+		singleRecords = append(singleRecords, singleRecord{
+			ID: id, Date: date[:10], Content: content, Score: score,
+			StudentIDs: studentIDs, StudentNames: studentNames,
+		})
+	}
+
+	// 查询寝室整体差母项记录（包含子项）
+	type multiSubRecord struct {
+		SubID        string   `json:"sub_id"`
+		Content      string   `json:"content"`
+		StudentIDs   []string `json:"student_ids"`
+		StudentNames string   `json:"student_names"`
+	}
+	type multiRecord struct {
+		ID      string           `json:"id"`
+		Date    string           `json:"date"`
+		Content string           `json:"content"`
+		Score   float64          `json:"score"`
+		Subs    []multiSubRecord `json:"subs"`
+	}
+	multiRows, err := a.DB.Query(`
+		SELECT r.id, r.submit_date, r.content, r.score
+		FROM police_style_records_multi_subrecords r
+		WHERE r.submit_date >= ? AND r.submit_date < ?
+		ORDER BY r.submit_date, r.id`,
+		weekStart.Format("2006-01-02 15:04:05"), weekEnd.Format("2006-01-02 15:04:05"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "查询寝室整体差记录失败: "+err.Error())
+		return
+	}
+	defer multiRows.Close()
+	multiMap := make(map[string]*multiRecord)
+	var multiOrder []string
+	for multiRows.Next() {
+		var id, date, content string
+		var score float64
+		if err := multiRows.Scan(&id, &date, &content, &score); err != nil {
+			writeError(w, http.StatusInternalServerError, "读取寝室整体差记录失败: "+err.Error())
+			return
+		}
+		multiMap[id] = &multiRecord{ID: id, Date: date[:10], Content: content, Score: score}
+		multiOrder = append(multiOrder, id)
+	}
+
+	// 查询子项
+	subRows, err := a.DB.Query(`
+		SELECT s.id, s.belongs_to, s.content, GROUP_CONCAT(o.student_id, ','), GROUP_CONCAT(st.stu_name, ',')
+		FROM subrecords_for_police_style_records_multi_subrecords s
+		JOIN ownership_multi_subrecords o ON o.subrecord_id = s.id
+		JOIN students st ON st.id = o.student_id
+		WHERE s.belongs_to IN (SELECT id FROM police_style_records_multi_subrecords WHERE submit_date >= ? AND submit_date < ?)
+		GROUP BY s.id
+		ORDER BY s.id`,
+		weekStart.Format("2006-01-02 15:04:05"), weekEnd.Format("2006-01-02 15:04:05"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "查询寝室整体差子项失败: "+err.Error())
+		return
+	}
+	defer subRows.Close()
+	for subRows.Next() {
+		var subID, belongsTo, subContent, idsStr, namesStr string
+		if err := subRows.Scan(&subID, &belongsTo, &subContent, &idsStr, &namesStr); err != nil {
+			writeError(w, http.StatusInternalServerError, "读取寝室整体差子项失败: "+err.Error())
+			return
+		}
+		if parent, ok := multiMap[belongsTo]; ok {
+			studentIDs := strings.Split(idsStr, ",")
+			if idsStr == "" {
+				studentIDs = nil
+			}
+			parent.Subs = append(parent.Subs, multiSubRecord{
+				SubID: subID, Content: subContent,
+				StudentIDs: studentIDs, StudentNames: namesStr,
+			})
+		}
+	}
+
+	var multiRecords []multiRecord
+	for _, id := range multiOrder {
+		if mr := multiMap[id]; mr != nil {
+			multiRecords = append(multiRecords, *mr)
+		}
+	}
+	if multiRecords == nil {
+		multiRecords = []multiRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"single": singleRecords,
+		"multi":  multiRecords,
+	})
+}
+
+

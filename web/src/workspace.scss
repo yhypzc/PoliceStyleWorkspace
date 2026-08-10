@@ -89,6 +89,7 @@ body { color: #20242c; background: var(--default-bg-color); font-family: Inter, 
 .daily-score-table-wrap { min-width: 0; overflow: auto; padding: 12px; }
 .daily-score-table-wrap .el-table { min-width: max-content; }
 .daily-discipline-list { margin-bottom: 12px; padding: 10px 12px; border-left: 3px solid #d74b58; background: #fff4f4; color: #7c2f37; }
+.daily-discipline-list .el-button { font-size: inherit; font-weight: 600; color: inherit; padding: 0; height: auto; }
 .daily-score-table-wrap .el-table .daily-score-highlight td { background: #fff1f0 !important; }
 @media (max-width: 900px) { .daily-semester-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .daily-semester-grid { grid-template-columns: 1fr; }.daily-management-detail { grid-template-columns: 145px minmax(0, 1fr); }.daily-week-list { padding: 7px; } }

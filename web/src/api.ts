@@ -39,6 +39,10 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     location.replace('/login')
     throw new Error('登录状态已失效')
   }
+  if (response.status === 403) {
+    location.replace('/login')
+    throw new Error('CSRF token 已过期，请重新登录')
+  }
   if (!response.ok) throw new Error(body.error || `请求失败 (${response.status})`)
   return body as T
 }

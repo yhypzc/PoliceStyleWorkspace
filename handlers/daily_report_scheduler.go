@@ -138,11 +138,34 @@ func (a *App) runDailyReport(today string, requireEnabled bool) error {
 	if sent == 0 {
 		return fmt.Errorf("没有启用的钉钉机器人")
 	}
+	
 	if len(failures) > 0 {
 		return fmt.Errorf("daily report failures: %s", strings.Join(failures, "; "))
 	}
+
+	// 每周五发送周汇总
+	reportDate, _ := parseReportDate(today)
+	if reportDate.Weekday() == time.Friday {
+		weeklyContent, err := a.formatWeeklySummaryMarkdown(today)
+		if err != nil {
+			log.Printf("[每日播报] 周汇总生成失败: %v", err)
+		} else {
+			for _, robot := range robots {
+				if robot.SetStatus == 0 {
+					continue
+				}
+				if err := postDingTalk(robot, weeklyContent, nil); err != nil {
+					log.Printf("[每日播报] 周汇总发送失败 (机器人 %s): %v", robot.Name, err)
+				} else {
+					log.Printf("[每日播报] 周汇总已发送 (机器人 %s)", robot.Name)
+				}
+			}
+		}
+	}
+
 	return nil
 }
+
 
 func (a *App) fetchDailyReport(config *models.DailyReportConfig, today string) (string, string, string, []string) {
 	jar, _ := cookiejar.New(nil)
@@ -811,12 +834,12 @@ func (a *App) formatDailyReportMessage(today string, deductions, waiting []map[s
 		return "", nil, err
 	}
 	var builder strings.Builder
-	builder.WriteString("警务化扣分通知\n")
-	builder.WriteString("日期：")
+	builder.WriteString("## 警务化扣分通知\n\n")
+	builder.WriteString("**日期：")
 	builder.WriteString(reportDate.Format("2006-01-02"))
-	builder.WriteString("\n")
+	builder.WriteString("**\n\n")
 	if info != nil {
-		builder.WriteString("周次：")
+		builder.WriteString("**周次：")
 		builder.WriteString(info.SemesterName)
 		builder.WriteString("第")
 		builder.WriteString(strconv.Itoa(info.WeekIndex + 1))
@@ -824,11 +847,11 @@ func (a *App) formatDailyReportMessage(today string, deductions, waiting []map[s
 		builder.WriteString(info.WeekStart)
 		builder.WriteString("~")
 		builder.WriteString(info.WeekEnd)
-		builder.WriteString("）\n")
+		builder.WriteString("）**\n\n")
 		if info.DutyDorm != "" {
-			builder.WriteString("本周包干区寝室：")
+			builder.WriteString("**本周包干区寝室：")
 			builder.WriteString(info.DutyDorm)
-			builder.WriteString("\n")
+			builder.WriteString("**\n\n")
 		}
 	}
 	if len(records) == 0 {
@@ -836,20 +859,23 @@ func (a *App) formatDailyReportMessage(today string, deductions, waiting []map[s
 	} else {
 		builder.WriteString("新增记录：")
 		builder.WriteString(strconv.Itoa(len(records)))
-		builder.WriteString("条\n")
-		builder.WriteString("记录ID | 日期 | 名字 | 扣分项目 | 分数")
+		builder.WriteString("条\n\n")
+		builder.WriteString("| 记录ID | 日期 | 名字 | 扣分项目 | 分数 |\n")
+		builder.WriteString("|---|---|---|---|---|\n")
 		for _, record := range records {
-			builder.WriteString("\n")
-			builder.WriteString(record.ID)
+			builder.WriteString("| ")
+			builder.WriteString(markdownEscapeTableCell(record.ID))
 			builder.WriteString(" | ")
-			builder.WriteString(record.Date)
+			builder.WriteString(markdownEscapeTableCell(record.Date))
 			builder.WriteString(" | ")
-			builder.WriteString(record.Names)
+			builder.WriteString(markdownEscapeTableCell(record.Names))
 			builder.WriteString(" | ")
-			builder.WriteString(record.Description)
+			builder.WriteString(markdownEscapeTableCell(record.Description))
 			builder.WriteString(" | ")
-			builder.WriteString(record.Points)
+			builder.WriteString(markdownEscapeTableCell(record.Points))
+			builder.WriteString(" |\n")
 		}
+		builder.WriteString("\n对扣分项目有异议请及时私信纪检委员申诉")
 	}
 	atMobiles := []string{}
 	if dailyReportShouldRemindDutyDorm(reportDate, info) {
@@ -861,6 +887,307 @@ func (a *App) formatDailyReportMessage(today string, deductions, waiting []map[s
 	}
 	return builder.String(), atMobiles, nil
 }
+
+func markdownEscapeTableCell(s string) string {
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
+}
+
+func formatDeductionScore(score float64) string {
+	if score == 0 {
+		return ""
+	}
+	s := strconv.FormatFloat(score, 'f', -1, 64)
+	if dot := strings.IndexByte(s, '.'); dot >= 0 {
+		if len(s)-dot-1 > 2 {
+			s = strconv.FormatFloat(score, 'f', 2, 64)
+			s = strings.TrimRight(s, "0")
+			s = strings.TrimRight(s, ".")
+		}
+	}
+	return s
+}
+
+func (a *App) formatWeeklySummaryMarkdown(today string) (string, error) {
+	reportDate, err := parseReportDate(today)
+	if err != nil {
+		return "", err
+	}
+	if reportDate.Weekday() != time.Friday {
+		return "", fmt.Errorf("非周五，不发送周汇总")
+	}
+	info, err := a.dailyReportSemesterInfo(reportDate)
+	if err != nil {
+		return "", err
+	}
+	if info == nil {
+		return "", fmt.Errorf("当前日期不在任何学期范围内")
+	}
+	weekStart, err := time.ParseInLocation("2006-01-02", info.WeekStart, time.Local)
+	if err != nil {
+		return "", err
+	}
+	weekEnd, err := time.ParseInLocation("2006-01-02", info.WeekEnd, time.Local)
+	if err != nil {
+		return "", err
+	}
+	weekEnd = weekEnd.AddDate(0, 0, 1)
+
+	students, err := models.ListStudents(a.DB)
+	if err != nil {
+		return "", err
+	}
+	dates := make([]string, 0, 7)
+	for day := weekStart; day.Before(weekEnd); day = day.AddDate(0, 0, 1) {
+		dates = append(dates, day.Format("2006-01-02"))
+	}
+	byID := make(map[string]*dailyStudentRow, len(students))
+	for _, student := range students {
+		byID[student.ID] = &dailyStudentRow{ID: student.ID, Name: student.Name, Scores: make(map[string]float64)}
+	}
+	if err := a.fillDailyScores(byID, weekStart, weekEnd); err != nil {
+		return "", err
+	}
+
+	punishEntries, _ := a.computePunishmentEntries(weekStart, weekEnd, 0.3)
+	punishSet := make(map[string]bool, len(punishEntries))
+	for _, pe := range punishEntries {
+		punishSet[pe.StudentID] = true
+	}
+
+	var builder strings.Builder
+	builder.WriteString("## ")
+	builder.WriteString(info.SemesterName)
+	builder.WriteString(" 学期第 ")
+	builder.WriteString(strconv.Itoa(info.WeekIndex + 1))
+	builder.WriteString(" 周警务化扣分汇总\n\n")
+	builder.WriteString("**")
+	builder.WriteString(weekStart.Format("2006-01-02"))
+	builder.WriteString(" ~ ")
+	builder.WriteString(weekEnd.AddDate(0, 0, -1).Format("2006-01-02"))
+	builder.WriteString("**\n\n")
+
+	if len(punishEntries) > 0 {
+		builder.WriteString("\n**本周预计惩戒名单：")
+		for i, pe := range punishEntries {
+			if i > 0 {
+				builder.WriteString("、")
+			}
+			builder.WriteString(markdownEscapeTableCell(pe.StudentName))
+		}
+		builder.WriteString("**\n\n")
+	}
+
+	hasRecords := false
+	for _, student := range students {
+		for _, score := range byID[student.ID].Scores {
+			if score != 0 {
+				hasRecords = true
+				break
+			}
+		}
+		if hasRecords {
+			break
+		}
+	}
+	if !hasRecords {
+		builder.WriteString("本周暂无扣分记录\n")
+		return builder.String(), nil
+	}
+
+	builder.WriteString("| 姓名 | 学号 |")
+	for _, date := range dates {
+		builder.WriteString(" ")
+		builder.WriteString(date[5:])
+		builder.WriteString(" |")
+	}
+	builder.WriteString(" 合计 |\n")
+
+	builder.WriteString("|------|------|")
+	for range dates {
+		builder.WriteString("------|")
+	}
+	builder.WriteString("------|\n")
+
+	type rowWithTotal struct {
+		name  string
+		id    string
+		total float64
+		row   *dailyStudentRow
+	}
+	ordered := make([]rowWithTotal, 0, len(students))
+	for _, student := range students {
+		r := byID[student.ID]
+		total := 0.0
+		for _, score := range r.Scores {
+			total += score
+		}
+		if total == 0 {
+			continue
+		}
+		ordered = append(ordered, rowWithTotal{r.Name, r.ID, total, r})
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].total > ordered[j].total })
+
+	for _, entry := range ordered {
+		highlight := punishSet[entry.id]
+		builder.WriteString("| ")
+		if highlight {
+			builder.WriteString("<font color=\"#800080\"><b>")
+		}
+		builder.WriteString(markdownEscapeTableCell(entry.name))
+		if highlight {
+			builder.WriteString("</b></font>")
+		}
+		builder.WriteString(" | ")
+		if highlight {
+			builder.WriteString("<font color=\"#800080\"><b>")
+		}
+		builder.WriteString(entry.id)
+		if highlight {
+			builder.WriteString("</b></font>")
+		}
+		builder.WriteString(" |")
+		for _, date := range dates {
+			formatted := formatDeductionScore(entry.row.Scores[date])
+			if formatted == "" {
+				builder.WriteString(" |")
+			} else {
+				builder.WriteString(" ")
+				if highlight {
+					builder.WriteString("<font color=\"#800080\"><b>")
+				}
+				builder.WriteString(formatted)
+				if highlight {
+					builder.WriteString("</b></font>")
+				}
+				builder.WriteString(" |")
+			}
+		}
+		builder.WriteString(" ")
+		if highlight {
+			builder.WriteString("<font color=\"#800080\"><b>")
+		}
+		builder.WriteString(formatDeductionScore(entry.total))
+		if highlight {
+			builder.WriteString("</b></font>")
+		}
+		builder.WriteString(" |\n")
+	}
+
+	builder.WriteString("| **合计** | |")
+	weekTotal := 0.0
+	for _, date := range dates {
+		dayTotal := 0.0
+		for _, entry := range ordered {
+			dayTotal += entry.row.Scores[date]
+		}
+		weekTotal += dayTotal
+		formatted := formatDeductionScore(dayTotal)
+		if formatted == "" {
+			builder.WriteString(" |")
+		} else {
+			builder.WriteString(" **")
+			builder.WriteString(formatted)
+			builder.WriteString("** |")
+		}
+	}
+	builder.WriteString(" **")
+	builder.WriteString(formatDeductionScore(weekTotal))
+	builder.WriteString("** |\n")
+
+	// ── 惩戒名单详情（总计 >= 0.3 或逻辑分 >= 0.3）──
+	allEntries, _ := a.computePunishmentEntries(weekStart, weekEnd, 0.0)
+	allByID := make(map[string]*punishmentEntry, len(allEntries))
+	for i := range allEntries {
+		allByID[allEntries[i].StudentID] = &allEntries[i]
+	}
+	type detailStudent struct {
+		name        string
+		id          string
+		weeklyTotal float64
+		logicTotal  float64
+		records     []punishmentRecord
+	}
+	detailed := make(map[string]*detailStudent)
+	for _, entry := range ordered {
+		if entry.total >= 0.3 {
+			ds := &detailStudent{name: entry.name, id: entry.id, weeklyTotal: entry.total}
+			if pe := allByID[entry.id]; pe != nil {
+				ds.logicTotal = pe.Total
+				ds.records = pe.Records
+			}
+			detailed[entry.id] = ds
+		}
+	}
+	for _, pe := range allEntries {
+		if pe.Total >= 0.3 {
+			if ds := detailed[pe.StudentID]; ds != nil {
+				if ds.logicTotal == 0 {
+					ds.logicTotal = pe.Total
+					ds.records = pe.Records
+				}
+			} else {
+				detailed[pe.StudentID] = &detailStudent{
+					name: pe.StudentName, id: pe.StudentID,
+					logicTotal: pe.Total, records: pe.Records,
+				}
+			}
+		}
+	}
+	if len(detailed) > 0 {
+		detailList := make([]*detailStudent, 0, len(detailed))
+		for _, ds := range detailed {
+			detailList = append(detailList, ds)
+		}
+		sort.SliceStable(detailList, func(i, j int) bool {
+			if detailList[i].logicTotal == detailList[j].logicTotal {
+				return detailList[i].weeklyTotal > detailList[j].weeklyTotal
+			}
+			return detailList[i].logicTotal > detailList[j].logicTotal
+		})
+		builder.WriteString("\n\n---\n\n")
+		for _, ds := range detailList {
+			builder.WriteString("**姓名：")
+			builder.WriteString(markdownEscapeTableCell(ds.name))
+			builder.WriteString("**\n\n")
+			builder.WriteString("- 计入惩戒分值：")
+			builder.WriteString(formatDeductionScore(ds.logicTotal))
+			builder.WriteString("\n")
+			builder.WriteString("- 是否惩戒：")
+			if ds.logicTotal >= 0.3 {
+				builder.WriteString("是")
+			} else {
+				builder.WriteString("否")
+			}
+			builder.WriteString("\n\n")
+			if len(ds.records) > 0 {
+				builder.WriteString("| id | 日期 | 扣分内容 | 计入综测分值 | 计入惩戒分值 |\n")
+				builder.WriteString("|---|---|---|---|---|\n")
+				for _, rec := range ds.records {
+					builder.WriteString("| ")
+					builder.WriteString(markdownEscapeTableCell(rec.RecordID))
+					builder.WriteString(" | ")
+					builder.WriteString(rec.Date)
+					builder.WriteString(" | ")
+					builder.WriteString(markdownEscapeTableCell(rec.Content))
+					builder.WriteString(" | ")
+					builder.WriteString(formatDeductionScore(rec.RawScore))
+					builder.WriteString(" | ")
+					builder.WriteString(formatDeductionScore(rec.LogicScore))
+					builder.WriteString(" |\n")
+				}
+			}
+			builder.WriteString("\n\n")
+		}
+		builder.WriteString("对惩戒名单有疑问请及时私信纪检委员\n")
+	}
+
+	return builder.String(), nil
+}
+
 
 func dailyReportShouldRemindDutyDorm(day time.Time, info *dailyReportSemesterInfo) bool {
 	if info == nil || info.DutyDorm == "" || strings.TrimSpace(info.DutyDormPhone) == "" {
@@ -1354,7 +1681,7 @@ func setPoliceHeaders(req *http.Request, base, refererPath string) {
 }
 
 func postDingTalk(robot models.DingTalkRobot, content string, atMobiles []string) error {
-	payload := dingTalkTextPayload(content, atMobiles)
+	payload := dingTalkMarkdownPayload("警务化扣分通知", content, atMobiles)
 	client := &http.Client{Timeout: 20 * time.Second}
 	requestURL, err := dingTalkWebhookURL(robot)
 	if err != nil {
@@ -1376,8 +1703,8 @@ func postDingTalk(robot models.DingTalkRobot, content string, atMobiles []string
 	return nil
 }
 
-func dingTalkTextPayload(content string, atMobiles []string) map[string]any {
-	payload := map[string]any{"msgtype": "text", "text": map[string]string{"content": content}}
+func dingTalkMarkdownPayload(title, text string, atMobiles []string) map[string]any {
+	payload := map[string]any{"msgtype": "markdown", "markdown": map[string]string{"title": title, "text": text}}
 	mobiles := normalizeAtMobiles(atMobiles)
 	if len(mobiles) > 0 {
 		payload["at"] = map[string]any{

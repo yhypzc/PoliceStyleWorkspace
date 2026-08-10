@@ -134,6 +134,7 @@ async function toggleRobot(row:any){
 }
 async function deleteRobot(row:any){ try { await api('/api/daily-report/robots',{method:'DELETE',body:JSON.stringify({robot_name: row.robot_name})}); reportRobots.value=reportRobots.value.filter(r=>r.robot_name!==row.robot_name); ElMessage.success('机器人已删除') } catch (error:any) { ElMessage.error(error.message) } }
 const dailySummaryVisible = ref(false)
+const showWeekRecords = ref(false)
 const dailySummaryRows = ref<DailySummaryRow[]>([])
 const dailyExportOrderVisible = ref(false)
 const dailyExportOrderRows = ref<DailyStudentRow[]>([])
@@ -461,15 +462,184 @@ async function openDailySummary() {
 async function selectDailyWeek(index: number) {
   if (!dailyManagementSemester.value) return
   dailySummaryVisible.value = false
+  clearWeekBatchSelection()
   dailyManagementBusy.value = true
   try {
     dailyWeekData.value = (await api<{ week: DailyWeek; rows: DailyStudentRow[] }>(`/api/daily-management/${encodeURIComponent(dailyManagementSemester.value.semester_name)}/weeks/${index}`, { cache: 'no-store' }))
     selectedDailyWeek.value = index
+    punishmentList.value = []
+    loadPunishmentList()
+    if (showWeekRecords.value) loadWeekRecords()
   } catch (error: any) { ElMessage.error(error.message) }
   finally { dailyManagementBusy.value = false }
 }
 function formatDailyDate(value: string) { return value.slice(5).replace('-', '/') }
 function closeDailySummary() { dailySummaryVisible.value = false }
+
+type WeekRecords = { single: { id: string; date: string; content: string; score: number; student_ids: string[]; student_names: string }[]; multi: { id: string; date: string; content: string; score: number; subs: { sub_id: string; content: string; student_ids: string[]; student_names: string }[] }[] }
+const weekRecords = ref<WeekRecords>({ single: [], multi: [] })
+const weekRecordsBusy = ref(false)
+const weekBatchSingleIDs = ref<string[]>([])
+const weekBatchMultiIDs = ref<string[]>([])
+const weekBatchExportBusy = ref(false)
+
+// ── Appeal dialog state ──
+const appealDialogVisible = ref(false)
+const appealRecord = ref<any>(null)
+const appealIsSchool = ref(false)
+const appealType = ref("single")
+const appealGrade = ref('')
+const appealClass = ref('')
+const appealText = ref('')
+const appealDdPhotos = ref<string[]>([])
+const appealAppealPhotos = ref<string[]>([])
+const appealKey = computed(() => {
+  if (!appealRecord.value) return ''
+  const r = appealRecord.value
+  const sid = r.student_ids ? r.student_ids[0] : ''
+  return (r.id || '') + '_' + (r.student_names || '') + '_' + sid
+})
+const appealSaving = ref(false)
+async function loadWeekRecords() {
+  if (!dailyManagementSemester.value || selectedDailyWeek.value === null) return
+  weekRecordsBusy.value = true
+  try {
+    const res = await api<WeekRecords & { ok: boolean }>(`/api/daily-management/${encodeURIComponent(dailyManagementSemester.value.semester_name)}/weeks/${selectedDailyWeek.value}/records`)
+    if (res.ok) weekRecords.value = { single: res.single || [], multi: res.multi || [] }
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { weekRecordsBusy.value = false }
+}
+function clearWeekBatchSelection() {
+  weekBatchSingleIDs.value = []
+  weekBatchMultiIDs.value = []
+}
+function toggleWeekSingle(id: string, checked: boolean) {
+  weekBatchSingleIDs.value = checked
+    ? Array.from(new Set([...weekBatchSingleIDs.value, id]))
+    : weekBatchSingleIDs.value.filter(item => item !== id)
+}
+function toggleWeekMulti(id: string, checked: boolean) {
+  weekBatchMultiIDs.value = checked
+    ? Array.from(new Set([...weekBatchMultiIDs.value, id]))
+    : weekBatchMultiIDs.value.filter(item => item !== id)
+}
+function toggleAllWeekSingle(checked: boolean) {
+  weekBatchSingleIDs.value = checked ? weekRecords.value.single.map(row => row.id) : []
+}
+function toggleAllWeekMulti(checked: boolean) {
+  weekBatchMultiIDs.value = checked ? weekRecords.value.multi.map(row => row.id) : []
+}
+async function batchExportWeekAppeals() {
+  const single = [...weekBatchSingleIDs.value]
+  const multi = [...weekBatchMultiIDs.value]
+  if (single.length === 0 && multi.length === 0) {
+    ElMessage.warning('请先勾选需要导出的扣分记录')
+    return
+  }
+  weekBatchExportBusy.value = true
+  try {
+    const response = await fetch('/api/appeal/batch-export', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ single, multi })
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      let message = text
+      try { message = JSON.parse(text).error || text } catch {}
+      throw new Error(message || `批量导出失败 (${response.status})`)
+    }
+    const blob = await response.blob()
+    const objectURL = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = objectURL
+    link.download = '申诉汇总.zip'
+    link.click()
+    URL.revokeObjectURL(objectURL)
+    ElMessage.success('批量导出已完成')
+  } catch (error: any) {
+    ElMessage.error(error.message || '批量导出失败')
+  } finally {
+    weekBatchExportBusy.value = false
+  }
+}
+async function openAppeal(row: any, type: string) {
+  appealRecord.value = row
+  appealIsSchool.value = (row.id || '').startsWith('xd_')
+  appealSaving.value = true
+  try {
+    const res = await api<any>(`/api/appeal/config?key=${encodeURIComponent(appealKey.value)}`)
+    if (res.config && Object.keys(res.config).length > 0) {
+      appealGrade.value = res.config.grade || ''
+      appealClass.value = res.config.class || ''
+      appealText.value = res.config.text_content || ''
+      appealDdPhotos.value = res.config.dd_photos || []
+      appealAppealPhotos.value = res.config.appeal_photos || []
+    } else {
+      appealGrade.value = ''
+      appealClass.value = ''
+      appealText.value = ''
+      appealDdPhotos.value = []
+      appealAppealPhotos.value = []
+    }
+  } catch { appealGrade.value = ''; appealClass.value = ''; appealText.value = '' }
+  finally { appealSaving.value = false }
+  appealDialogVisible.value = true
+}
+async function saveAppealConfig() {
+  if (!appealRecord.value) return
+  appealSaving.value = true
+  try {
+    await api('/api/appeal/config', { method: 'POST', body: JSON.stringify({
+      key: appealKey.value, grade: appealGrade.value, class: appealClass.value,
+      text_content: appealText.value, dd_photos: appealDdPhotos.value, appeal_photos: appealAppealPhotos.value
+    })})
+    ElMessage.success('已保存')
+  } catch (e: any) { ElMessage.error(e.message) }
+  finally { appealSaving.value = false }
+}
+async function uploadAppealPhoto(type: string) {
+  const input = document.createElement('input'); input.type = 'file'; input.accept = '.jpg,.jpeg,.png,.webp'
+  input.onchange = async () => {
+    if (!input.files || !input.files[0]) return
+    const form = new FormData(); form.append('photo', input.files[0])
+    try {
+      const res = await fetch(`/api/appeal/upload-photo?key=${encodeURIComponent(appealKey.value)}&type=${type}`, { method: 'POST', body: form, credentials: 'same-origin' })
+      const data = await res.json()
+      if (!data.ok) { ElMessage.error(data.error); return }
+      ElMessage.success('上传成功')
+      if (type === 'dd') appealDdPhotos.value = [...appealDdPhotos.value, data.filename]
+      else appealAppealPhotos.value = [...appealAppealPhotos.value, data.filename]
+    } catch (e: any) { ElMessage.error('上传失败') }
+  }
+  input.click()
+}
+async function deleteAppealPhoto(filename: string, type: string) {
+  try {
+    await api('/api/appeal/delete-photo', { method: 'POST', body: JSON.stringify({ key: appealKey.value, filename }) })
+    if (type === 'dd') appealDdPhotos.value = appealDdPhotos.value.filter(f => f !== filename)
+    else appealAppealPhotos.value = appealAppealPhotos.value.filter(f => f !== filename)
+    ElMessage.success('已删除')
+  } catch (e: any) { ElMessage.error(e.message) }
+}
+async function exportAppealZip() {
+  if (!appealRecord.value) return
+  await saveAppealConfig()
+  const params = new URLSearchParams({ id: appealRecord.value.id })
+  const url = '/api/appeal/export-zip?' + params.toString()
+  const link = document.createElement('a')
+  link.href = url
+  link.download = ''
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+}
+function toggleWeekRecords() {
+  showWeekRecords.value = !showWeekRecords.value
+  if (showWeekRecords.value) loadWeekRecords()
+  else clearWeekBatchSelection()
+}
 async function openDailyWeekExport() {
   if (!dailyManagementSemester.value || selectedDailyWeek.value === null) return
   try {
@@ -512,8 +682,28 @@ function formatSummaryScore(value: number) {
 }
 function formatDailyCellScore(value: number) { return value === 0 ? '' : formatSummaryScore(value) }
 function dailyRowTotal(row: DailyStudentRow) { return Object.values(row.scores).reduce((sum, score) => sum + score, 0) }
-function dailyRowClassName({ row }: { row: DailyStudentRow }) { return dailyRowTotal(row) > 0.3 ? 'daily-score-highlight' : '' }
-const dailyDisciplineNames = computed(() => dailyWeekData.value.rows.filter((row) => dailyRowTotal(row) > 0.3).map((row) => row.name))
+function dailyRowClassName({ row }: { row: DailyStudentRow }) { return punishmentIDSet.value.has(row.id) ? 'daily-score-highlight' : '' }
+const dailyDisciplineNames = computed(() => punishmentList.value.map((e) => e.student_name))
+
+type PunishmentEntry = { student_id: string; student_name: string; total: number; records: { record_id: string; date: string; content: string; student_count: number; is_multi: boolean; raw_score: number; logic_score: number }[] }
+const punishmentList = ref<PunishmentEntry[]>([])
+async function loadPunishmentList() {
+  if (!dailyManagementSemester.value || selectedDailyWeek.value === null) return
+  punishmentList.value = []
+  const semester = dailyManagementSemester.value.semester_name
+  const week = selectedDailyWeek.value
+  try {
+    const res = await api<{ entries: PunishmentEntry[] }>(`/api/workspace/punishment-list/${encodeURIComponent(semester)}/weeks/${week}`)
+    if (dailyManagementSemester.value?.semester_name === semester && selectedDailyWeek.value === week) {
+      punishmentList.value = Array.isArray(res.entries) ? res.entries : []
+    }
+  } catch { /* keep empty */ }
+}
+const punishmentIDSet = computed(() => new Set(punishmentList.value.map(e => e.student_id)))
+const selectedPunishmentStudent = ref<PunishmentEntry | null>(null)
+const punishmentDetailVisible = ref(false)
+function openPunishmentDetail(row: PunishmentEntry) { selectedPunishmentStudent.value = row; punishmentDetailVisible.value = true }
+function formatDetailDate(d: string) { return d.slice(5) }
 
 // ── Dorm actions ──
 async function loadDorms() {
@@ -956,13 +1146,87 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             <div v-else class="daily-management-empty">暂无学期</div>
           </template>
           <template v-else>
-            <div class="semester-toolbar"><div><h2 class="semester-title">{{ dailyManagementSemester.semester_name }}</h2><p class="daily-detail-date">{{ dailyManagementSemester.start_time }} 至 {{ dailyManagementSemester.end_time }}</p></div><div style="display:flex;gap:10px"><ElButton @click="dailySummaryVisible ? closeDailySummary() : openDailySummary()">{{ dailySummaryVisible ? '返回周详情' : '学期汇总' }}</ElButton><ElButton @click="dailySummaryVisible ? exportDailySummary() : openDailyWeekExport()">导出 XLSX</ElButton><ElButton @click="closeDailyManagementSemester">返回学期列表</ElButton></div></div>
+            <div class="semester-toolbar"><div><h2 class="semester-title">{{ dailyManagementSemester.semester_name }}</h2><p class="daily-detail-date">{{ dailyManagementSemester.start_time }} 至 {{ dailyManagementSemester.end_time }}</p></div><div style="display:flex;gap:10px"><ElButton v-if="showWeekRecords" type="success" :loading="weekBatchExportBusy" @click="batchExportWeekAppeals">批量导出</ElButton><ElButton @click="toggleWeekRecords">{{ showWeekRecords ? '返回周详情' : '本周扣分条目汇总' }}</ElButton><ElButton @click="dailySummaryVisible ? closeDailySummary() : openDailySummary()">{{ dailySummaryVisible ? '返回周详情' : '学期汇总' }}</ElButton><ElButton @click="dailySummaryVisible ? exportDailySummary() : openDailyWeekExport()">导出 XLSX</ElButton><ElButton @click="closeDailyManagementSemester">返回学期列表</ElButton></div></div>
             <div class="daily-management-detail" v-loading="dailyManagementBusy">
               <aside class="daily-week-list"><button v-for="week in dailyWeeks" :key="week.index" :class="{ active: selectedDailyWeek === week.index }" @click="selectDailyWeek(week.index)">第 {{ week.index + 1 }} 周<small>{{ week.start }} 至 {{ week.end }}</small></button></aside>
-              <div class="daily-score-table-wrap"><div v-if="!dailySummaryVisible" class="daily-discipline-list"><strong>第 {{ (selectedDailyWeek ?? 0) + 1 }} 周个人惩戒名单：</strong><span>{{ dailyDisciplineNames.length ? dailyDisciplineNames.join('、') : '无' }}</span></div><ElTable :data="dailySummaryVisible ? dailySummaryRows : dailyWeekData.rows" :row-class-name="dailySummaryVisible ? undefined : dailyRowClassName" border stripe style="width:100%"><ElTableColumn prop="id" label="学号" width="115" fixed="left" /><ElTableColumn prop="name" label="姓名" width="100" fixed="left" /><ElTableColumn v-if="dailySummaryVisible" prop="total" label="总扣分" width="120" fixed="left"><template #default="{ row }">{{ formatSummaryScore(row.total) }}</template></ElTableColumn><template v-if="dailySummaryVisible"><ElTableColumn v-for="week in dailyWeeks" :key="week.index" :label="`第${week.index + 1}周 (${formatDailyDate(week.start)}~${formatDailyDate(week.end)})`" width="180" align="center"><template #default="{ row }">{{ formatSummaryScore(row.scores[`week_${week.index}`] || 0) }}</template></ElTableColumn></template><template v-else><ElTableColumn v-for="date in dailyWeekData.week.dates" :key="date" :label="formatDailyDate(date)" width="96" align="center"><template #default="{ row }">{{ formatDailyCellScore(row.scores[date] || 0) }}</template></ElTableColumn><ElTableColumn label="个人总计" width="120" fixed="right" align="center"><template #default="{ row }">{{ formatSummaryScore(dailyRowTotal(row)) }}</template></ElTableColumn></template></ElTable></div>
+              <div v-if="showWeekRecords" class="daily-score-table-wrap" v-loading="weekRecordsBusy">
+  <h3 style="margin-top:0">常规扣分项目</h3>
+  <ElTable :data="weekRecords.single" border stripe style="width:100%;margin-bottom:18px">
+    <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="weekRecords.single.length > 0 && weekBatchSingleIDs.length === weekRecords.single.length" :indeterminate="weekBatchSingleIDs.length > 0 && weekBatchSingleIDs.length < weekRecords.single.length" @change="value => toggleAllWeekSingle(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchSingleIDs.includes(row.id)" @change="value => toggleWeekSingle(row.id, Boolean(value))" /></template></ElTableColumn>
+    <ElTableColumn prop="id" label="记录ID" width="140" />
+    <ElTableColumn prop="date" label="日期" width="110" />
+    <ElTableColumn prop="content" label="扣分项目" min-width="200" />
+    <ElTableColumn prop="score" label="分数" width="80" />
+    <ElTableColumn prop="student_names" label="认定学生" min-width="160" />
+    <ElTableColumn label="操作" width="120"><template #default="{ row }"><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
+      </ElTable>
+  <h3>寝室整体差扣分项目</h3>
+  <ElTable :data="weekRecords.multi" border stripe style="width:100%">
+    <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="weekRecords.multi.length > 0 && weekBatchMultiIDs.length === weekRecords.multi.length" :indeterminate="weekBatchMultiIDs.length > 0 && weekBatchMultiIDs.length < weekRecords.multi.length" @change="value => toggleAllWeekMulti(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchMultiIDs.includes(row.id)" @change="value => toggleWeekMulti(row.id, Boolean(value))" /></template></ElTableColumn>
+    <ElTableColumn type="expand">
+      <template #default="{ row }">
+        <ElTable :data="row.subs" border size="small" style="width:100%">
+          <ElTableColumn prop="content" label="子项内容" min-width="200" />
+          <ElTableColumn prop="student_names" label="负责学生" min-width="160" />
+        </ElTable>
+      </template>
+    </ElTableColumn>
+    <ElTableColumn prop="id" label="记录ID" width="140" />
+    <ElTableColumn prop="date" label="日期" width="110" />
+    <ElTableColumn prop="content" label="扣分项目" min-width="220" />
+    <ElTableColumn prop="score" label="分数" width="80" />
+    <ElTableColumn label="操作" width="120"><template #default="{ row }"><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
+      </ElTable>
+</div>
+<div v-else class="daily-score-table-wrap"><div v-if="!dailySummaryVisible" class="daily-discipline-list"><strong>第 {{ (selectedDailyWeek ?? 0) + 1 }} 周个人惩戒名单：</strong><strong v-if="!punishmentList.length">无</strong><template v-else><template v-for="(entry, i) in punishmentList" :key="entry.student_id"><ElButton type="primary" link @click="openPunishmentDetail(entry)">{{ entry.student_name }}</ElButton><span v-if="i < punishmentList.length - 1">、</span></template></template></div><ElTable :data="dailySummaryVisible ? dailySummaryRows : dailyWeekData.rows" :row-class-name="dailySummaryVisible ? undefined : dailyRowClassName" border stripe style="width:100%"><ElTableColumn prop="id" label="学号" width="115" fixed="left" /><ElTableColumn prop="name" label="姓名" width="100" fixed="left" /><ElTableColumn v-if="dailySummaryVisible" prop="total" label="总扣分" width="120" fixed="left"><template #default="{ row }">{{ formatSummaryScore(row.total) }}</template></ElTableColumn><template v-if="dailySummaryVisible"><ElTableColumn v-for="week in dailyWeeks" :key="week.index" :label="`第${week.index + 1}周 (${formatDailyDate(week.start)}~${formatDailyDate(week.end)})`" width="180" align="center"><template #default="{ row }">{{ formatSummaryScore(row.scores[`week_${week.index}`] || 0) }}</template></ElTableColumn></template><template v-else><ElTableColumn v-for="date in dailyWeekData.week.dates" :key="date" :label="formatDailyDate(date)" width="96" align="center"><template #default="{ row }">{{ formatDailyCellScore(row.scores[date] || 0) }}</template></ElTableColumn><ElTableColumn label="个人总计" width="120" fixed="right" align="center"><template #default="{ row }">{{ formatSummaryScore(dailyRowTotal(row)) }}</template></ElTableColumn></template></ElTable></div>
             </div>
           </template>
-          <ElDialog v-model="dailyExportOrderVisible" title="自定义导出顺序" width="520px">
+          <ElDialog v-model="appealDialogVisible" :title="appealIsSchool ? '校督申诉模板导出' : '大队督察申诉模板导出'" width="620px" @close="appealRecord = null">
+          <div v-if="appealRecord" v-loading="appealSaving">
+            <ElForm label-position="top" label-width="auto">
+              <ElFormItem label="日期"><ElInput :model-value="appealRecord.date.slice(5).replace('-', '.')" disabled /></ElFormItem>
+              <ElFormItem label="项目名称"><ElInput :model-value="appealRecord.content" disabled /></ElFormItem>
+              <ElFormItem label="姓名"><ElInput :model-value="appealRecord.student_names" disabled /></ElFormItem>
+              <ElFormItem label="大队"><ElInput v-model="appealGrade" placeholder="大队" /></ElFormItem>
+              <ElFormItem label="区队"><ElInput v-model="appealClass" placeholder="区队" /></ElFormItem>
+              <ElFormItem label="学生复议情况说明"><ElInput v-model="appealText" type="textarea" :rows="3" placeholder="请填写复议情况说明" /></ElFormItem>
+              <template v-if="!appealIsSchool">
+                <ElFormItem label="大督扣分照片">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealDdPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'dd')">×</ElButton></div></div>
+                  <ElButton size="small" @click="uploadAppealPhoto('dd')">上传照片</ElButton>
+                </ElFormItem>
+                <ElFormItem label="申诉照片">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealAppealPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton></div></div>
+                  <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
+                </ElFormItem>
+              </template>
+              <template v-else>
+                <ElFormItem label="申诉照片">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealAppealPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton></div></div>
+                  <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
+                </ElFormItem>
+              </template>
+            </ElForm>
+            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
+              <ElButton @click="appealDialogVisible = false">取消</ElButton>
+              <ElButton type="primary" :loading="appealSaving" @click="saveAppealConfig()">保存</ElButton>
+              <ElButton type="success" @click="exportAppealZip()">导出</ElButton>
+            </div>
+          </div>
+        </ElDialog>
+        <ElDialog v-model="punishmentDetailVisible" :title="selectedPunishmentStudent ? '惩戒人：' + selectedPunishmentStudent.student_name : ''" width="760px">
+                <div v-if="selectedPunishmentStudent">
+                  <p style="margin-bottom:16px;font-size:15px"><strong>计入惩戒分值：</strong>{{ selectedPunishmentStudent.total.toFixed(2) }}</p>
+                  <ElTable :data="selectedPunishmentStudent.records" border stripe size="small" style="width:100%">
+                    <ElTableColumn prop="record_id" label="ID" width="120" />
+                    <ElTableColumn label="日期" width="110"><template #default="{ row }">{{ formatDetailDate(row.date) }}</template></ElTableColumn>
+                    <ElTableColumn prop="content" label="扣分内容" min-width="200" />
+                    <ElTableColumn label="计入综测分值" width="130" align="center"><template #default="{ row }">{{ row.raw_score.toFixed(3) }}</template></ElTableColumn>
+                    <ElTableColumn label="计入惩戒分值" width="130" align="center"><template #default="{ row }">{{ row.logic_score.toFixed(3) }}</template></ElTableColumn>
+                  </ElTable>
+                </div>
+              </ElDialog>
+              <ElDialog v-model="dailyExportOrderVisible" title="自定义导出顺序" width="520px">
             <p class="daily-export-order-tip">拖动学生调整导出顺序，未调整的学生将按原顺序追加。</p>
             <div class="dorm-order-list">
               <div v-for="(row, index) in dailyExportOrderRows" :key="row.id" class="dorm-order-item" draggable="true" @dragstart="onDailyExportDragStart(row.id)" @dragover.prevent @drop="onDailyExportDrop(row.id)"><span class="dorm-order-index">{{ index + 1 }}</span><span>{{ row.name }}（{{ row.id }}）</span><span class="dorm-drag-hint">拖动排序</span></div>
