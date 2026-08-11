@@ -73,7 +73,6 @@ func (a *App) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	middleware.SetCookie(w, sessionID, 30*time.Minute)
-	middleware.SetCSRFCookie(w, csrfToken, 30*time.Minute)
 	success = true
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": models.User{Username: req.Username}, "csrf_token": csrfToken})
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api } from './api'
+import { api, clearCSRFToken, csrfHeaders, setCSRFToken } from './api'
 import EmojiText from '../../third_party/art-design-pro/src/utils/ui/emojo'
 
 const page = computed(() => location.pathname.includes('daily-report') ? 'daily-report' : location.pathname.includes('change-password') ? 'password' : location.pathname.includes('daily-management') ? 'daily-management' : location.pathname.includes('dorms') ? 'dorms' : location.pathname.includes('students') ? 'students' : location.pathname.includes('multi-deductions') ? 'multi-deductions' : location.pathname.includes('deductions') ? 'deductions' : location.pathname.includes('semester') ? 'semester' : location.pathname.includes('workspace') ? 'workspace' : 'login')
@@ -408,11 +408,12 @@ async function submitLogin() {
   busy.value = true
   try {
     const timestamp = Date.now()
-    await api('/api/login', {
+    const result = await api<{ csrf_token?: string }>('/api/login', {
       method: 'POST',
       headers: { 'X-Login-Timestamp': String(timestamp) },
       body: JSON.stringify({ ...login, timestamp })
     })
+    setCSRFToken(result.csrf_token || '')
     location.assign('/workspace')
   } catch (error) { ElMessage.error(`${EmojiText['400']} ${(error as Error).message}`) }
   finally { busy.value = false }
@@ -430,6 +431,7 @@ async function submitPassword() {
 
 async function logout() {
   try { await api('/api/logout', { method: 'POST' }) } catch { /* ignore */ }
+  clearCSRFToken()
   location.replace('/login')
 }
 async function openDailyManagementSemester(semester: Semester) {
@@ -542,7 +544,7 @@ async function batchExportWeekAppeals() {
     const response = await fetch('/api/appeal/batch-export', {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...csrfHeaders() },
       body: JSON.stringify({ single, multi })
     })
     if (!response.ok) {
@@ -606,7 +608,7 @@ async function uploadAppealPhoto(type: string) {
     if (!input.files || !input.files[0]) return
     const form = new FormData(); form.append('photo', input.files[0])
     try {
-      const res = await fetch(`/api/appeal/upload-photo?key=${encodeURIComponent(appealKey.value)}&type=${type}`, { method: 'POST', body: form, credentials: 'same-origin' })
+      const res = await fetch(`/api/appeal/upload-photo?key=${encodeURIComponent(appealKey.value)}&type=${type}`, { method: 'POST', body: form, credentials: 'same-origin', headers: csrfHeaders() })
       const data = await res.json()
       if (!data.ok) { ElMessage.error(data.error); return }
       ElMessage.success('上传成功')
@@ -618,7 +620,7 @@ async function uploadAppealPhoto(type: string) {
 }
 async function deleteAppealPhoto(filename: string, type: string) {
   try {
-    await api('/api/appeal/delete-photo', { method: 'POST', body: JSON.stringify({ key: appealKey.value, filename }) })
+    await api('/api/appeal/delete-photo', { method: 'POST', headers: csrfHeaders(), body: JSON.stringify({ key: appealKey.value, filename }) })
     if (type === 'dd') appealDdPhotos.value = appealDdPhotos.value.filter(f => f !== filename)
     else appealAppealPhotos.value = appealAppealPhotos.value.filter(f => f !== filename)
     ElMessage.success('已删除')

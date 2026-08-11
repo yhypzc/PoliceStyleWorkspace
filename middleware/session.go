@@ -9,7 +9,6 @@ import (
 )
 
 const CookieName = "PSW_SESSION_ID"
-const CSRFTokenCookieName = "PSW_CSRF_TOKEN"
 const CSRFTokenHeaderName = "X-CSRF-Token"
 
 type Session struct {
@@ -102,20 +101,8 @@ func SetCookie(w http.ResponseWriter, id string, ttl time.Duration) {
 	})
 }
 
-func SetCSRFCookie(w http.ResponseWriter, token string, ttl time.Duration) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     CSRFTokenCookieName,
-		Value:    token,
-		Path:     "/",
-		HttpOnly: false,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(ttl),
-	})
-}
-
 func ClearCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
-	http.SetCookie(w, &http.Cookie{Name: CSRFTokenCookieName, Value: "", Path: "/", MaxAge: -1, SameSite: http.SameSiteLaxMode})
 }
 
 func RequireAuth(store *SessionStore, next http.Handler) http.Handler {
@@ -129,11 +116,7 @@ func RequireAuth(store *SessionStore, next http.Handler) http.Handler {
 		}
 		if requiresCSRFCheck(r.Method) {
 			headerToken := r.Header.Get(CSRFTokenHeaderName)
-			cookieToken := ""
-			if c, err := r.Cookie(CSRFTokenCookieName); err == nil {
-				cookieToken = c.Value
-			}
-			if headerToken != session.CSRFToken && cookieToken != session.CSRFToken {
+			if headerToken != session.CSRFToken {
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`{"ok":false,"error":"csrf token invalid"}`))

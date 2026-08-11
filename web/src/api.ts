@@ -1,10 +1,17 @@
-function csrfToken(): string {
-  return document.cookie
-    .split('; ')
-    .find((item) => item.startsWith('PSW_CSRF_TOKEN='))
-    ?.split('=')
-    .slice(1)
-    .join('=') || ''
+const csrfStorageKey = 'PSW_CSRF_TOKEN'
+
+export function setCSRFToken(token: string) {
+  if (token) sessionStorage.setItem(csrfStorageKey, token)
+  else sessionStorage.removeItem(csrfStorageKey)
+}
+
+export function clearCSRFToken() {
+  sessionStorage.removeItem(csrfStorageKey)
+}
+
+export function csrfHeaders(): Record<string, string> {
+  const token = sessionStorage.getItem(csrfStorageKey) || ''
+  return token ? { 'X-CSRF-Token': token } : {}
 }
 
 function needsCSRF(method?: string): boolean {
@@ -16,8 +23,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const isFormData = Object.prototype.toString.call(init.body) === '[object FormData]'
   const headers = { ...(init.headers as Record<string, string> || {}) }
   if (needsCSRF(init.method)) {
-    const token = csrfToken()
-    if (token) headers['X-CSRF-Token'] = token
+    Object.assign(headers, csrfHeaders())
   }
   const response = await fetch(path, {
     ...init,
@@ -36,10 +42,12 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
   }
   if (response.status === 401 && path !== '/api/login') {
+    clearCSRFToken()
     location.replace('/login')
     throw new Error('登录状态已失效')
   }
   if (response.status === 403) {
+    clearCSRFToken()
     location.replace('/login')
     throw new Error('CSRF token 已过期，请重新登录')
   }

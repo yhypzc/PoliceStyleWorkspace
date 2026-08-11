@@ -298,6 +298,10 @@ func (a *App) DeleteAppealPhoto(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if filepath.Base(req.Filename) != req.Filename || strings.TrimSpace(req.Filename) == "" {
+		writeError(w, http.StatusBadRequest, "文件名无效")
+		return
+	}
 	// First check JSON record exists and photo is in the arrays
 	store := a.appealStore()
 	_ = store.load()
