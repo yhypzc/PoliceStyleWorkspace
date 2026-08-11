@@ -50,6 +50,8 @@
 
 ### **每周个人惩戒名单计算**
 
+`handlers/punishment.go` 里面的函数 `computePunishmentEntries`
+
 算法如下：
 
 第一步，系统从数据库查出第M周所有关于学生A的扣分常规项目和寝室整体差子项
