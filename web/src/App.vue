@@ -500,6 +500,7 @@ const appealKey = computed(() => {
   return (r.id || '') + '_' + (r.student_names || '') + '_' + sid
 })
 const appealSaving = ref(false)
+const appealExporting = ref(false)
 async function loadWeekRecords() {
   if (!dailyManagementSemester.value || selectedDailyWeek.value === null) return
   weekRecordsBusy.value = true
@@ -624,16 +625,29 @@ async function deleteAppealPhoto(filename: string, type: string) {
   } catch (e: any) { ElMessage.error(e.message) }
 }
 async function exportAppealZip() {
-  if (!appealRecord.value) return
-  await saveAppealConfig()
-  const params = new URLSearchParams({ id: appealRecord.value.id })
-  const url = '/api/appeal/export-zip?' + params.toString()
-  const link = document.createElement('a')
-  link.href = url
-  link.download = ''
-  document.body.appendChild(link)
-  link.click()
-  document.body.removeChild(link)
+  if (!appealRecord.value || appealExporting.value) return
+  appealExporting.value = true
+  try {
+    await saveAppealConfig()
+    const params = new URLSearchParams({ id: appealRecord.value.id })
+    const response = await fetch('/api/appeal/export-zip?' + params.toString(), { credentials: 'same-origin' })
+    if (!response.ok) throw new Error('导出失败')
+    const blob = await response.blob()
+    const cd = response.headers.get('content-disposition') || ''
+    const name = cd.match(/filename\*=UTF-8''([^;]+)/)?.[1]
+      ? decodeURIComponent(RegExp.$1)
+      : (cd.match(/filename="?([^\";]+)"?/)?.[1] || 'appeal.zip')
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name
+    link.click()
+    URL.revokeObjectURL(url)
+  } catch (error: any) {
+    ElMessage.error(error?.message || '导出失败')
+  } finally {
+    appealExporting.value = false
+  }
 }
 function toggleWeekRecords() {
   showWeekRecords.value = !showWeekRecords.value
@@ -1210,7 +1224,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
               <ElButton @click="appealDialogVisible = false">取消</ElButton>
               <ElButton type="primary" :loading="appealSaving" @click="saveAppealConfig()">保存</ElButton>
-              <ElButton type="success" @click="exportAppealZip()">导出</ElButton>
+              <ElButton type="success" :loading="appealExporting" :disabled="appealExporting" @click="exportAppealZip()">{{ appealExporting ? '请稍候...' : '导出' }}</ElButton>
             </div>
           </div>
         </ElDialog>
