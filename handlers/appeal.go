@@ -175,16 +175,97 @@ func appealRecordUnrecognized(names, studentIDs string) bool {
 	return strings.TrimSpace(names) == "" && strings.TrimSpace(studentIDs) == ""
 }
 
-func appealEvidenceDir(configDir, key string) string {
-	return filepath.Join(configDir, "evidence_"+appealRecordIDFromKey(key))
-}
-
 func appealRecordIDFromKey(key string) string {
 	key = strings.TrimSpace(key)
 	if len(key) >= 32 {
-		return key[:32]
+		key = key[:32]
 	}
 	return key
+}
+
+func safeAppealRecordKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" || key == "." || key == ".." || key != filepath.Base(key) || filepath.IsAbs(key) {
+		return false
+	}
+	for _, r := range key {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func safeAppealPhotoName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || name != filepath.Base(name) || filepath.IsAbs(name) {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp"
+}
+
+func safeAppealEvidenceDir(configDir, key string) (string, error) {
+	if filepath.Clean(configDir) == "." || !safeAppealRecordKey(key) {
+		return "", fmt.Errorf("申诉记录路径无效")
+	}
+	root, err := filepath.Abs(configDir)
+	if err != nil {
+		return "", fmt.Errorf("解析配置目录失败: %w", err)
+	}
+	dir := filepath.Join(root, "evidence_"+appealRecordIDFromKey(key))
+	if filepath.Dir(dir) != root {
+		return "", fmt.Errorf("申诉证据目录越界")
+	}
+	return dir, nil
+}
+
+func pathWithin(base, target string) bool {
+	rel, err := filepath.Rel(base, target)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func safeAppealPhotoPath(configDir, key, name string) (string, string, error) {
+	if !safeAppealPhotoName(name) {
+		return "", "", fmt.Errorf("图片文件名无效")
+	}
+	dir, err := safeAppealEvidenceDir(configDir, key)
+	if err != nil {
+		return "", "", err
+	}
+	path := filepath.Join(dir, name)
+	if filepath.Dir(path) != dir {
+		return "", "", fmt.Errorf("图片路径越界")
+	}
+	return dir, path, nil
+}
+
+func safeExistingAppealPhotoPath(configDir, key, name string) (string, error) {
+	dir, path, err := safeAppealPhotoPath(configDir, key, name)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(configDir)
+	if err != nil {
+		return "", err
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	if !pathWithin(root, realDir) || !pathWithin(realDir, realPath) {
+		return "", fmt.Errorf("图片真实路径越界")
+	}
+	return path, nil
 }
 
 func (a *App) appealStore() *appealStore {
@@ -204,6 +285,10 @@ func (a *App) GetAppealConfig(w http.ResponseWriter, r *http.Request) {
 	store := a.appealStore()
 	_ = store.load()
 	key := r.URL.Query().Get("key")
+	if !safeAppealRecordKey(key) {
+		writeError(w, http.StatusBadRequest, "记录标识无效")
+		return
+	}
 	r2, _ := store.getRecord(key)
 	cfg := appealConfig{
 		Grade: store.getGrade(), Class: store.getClass(),
@@ -220,6 +305,10 @@ func (a *App) SaveAppealConfig(w http.ResponseWriter, r *http.Request) {
 		TextContent string `json:"text_content"`
 	}
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !safeAppealRecordKey(req.Key) {
+		writeError(w, http.StatusBadRequest, "记录标识无效")
 		return
 	}
 	store := a.appealStore()
@@ -239,8 +328,8 @@ func (a *App) SaveAppealConfig(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) UploadAppealPhoto(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
-	if key == "" {
-		writeError(w, http.StatusBadRequest, "缺少记录标识")
+	if !safeAppealRecordKey(key) {
+		writeError(w, http.StatusBadRequest, "记录标识无效")
 		return
 	}
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -271,10 +360,38 @@ func (a *App) UploadAppealPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir := appealEvidenceDir(a.ConfigDir, key)
-	os.MkdirAll(dir, 0755)
 	name := fmt.Sprintf("%s_%s%s", nowHexStr(), randHex(6), ext)
-	os.WriteFile(filepath.Join(dir, name), data, 0644)
+	dir, path, err := safeAppealPhotoPath(a.ConfigDir, key, name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建图片目录失败")
+		return
+	}
+	root, err := filepath.Abs(a.ConfigDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "解析图片目录失败")
+		return
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil || !pathWithin(root, realDir) {
+		writeError(w, http.StatusBadRequest, "图片目录路径无效")
+		return
+	}
+	outputFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存图片失败")
+		return
+	}
+	_, writeErr := outputFile.Write(data)
+	closeErr := outputFile.Close()
+	if writeErr != nil || closeErr != nil {
+		_ = os.Remove(path)
+		writeError(w, http.StatusInternalServerError, "保存图片失败")
+		return
+	}
 	// Persist photo reference immediately
 	photoType := r.URL.Query().Get("type")
 	store := a.appealStore()
@@ -286,7 +403,11 @@ func (a *App) UploadAppealPhoto(w http.ResponseWriter, r *http.Request) {
 		r2.AppealPhotos = append(r2.AppealPhotos, name)
 	}
 	store.setRecord(key, r2)
-	_ = store.save()
+	if err := store.save(); err != nil {
+		_ = os.Remove(path)
+		writeError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "filename": name})
 }
 
@@ -298,8 +419,13 @@ func (a *App) DeleteAppealPhoto(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if filepath.Base(req.Filename) != req.Filename || strings.TrimSpace(req.Filename) == "" {
-		writeError(w, http.StatusBadRequest, "文件名无效")
+	if !safeAppealRecordKey(req.Key) || !safeAppealPhotoName(req.Filename) {
+		writeError(w, http.StatusBadRequest, "图片路径无效")
+		return
+	}
+	_, photoPath, err := safeAppealPhotoPath(a.ConfigDir, req.Key, req.Filename)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// First check JSON record exists and photo is in the arrays
@@ -325,8 +451,15 @@ func (a *App) DeleteAppealPhoto(w http.ResponseWriter, r *http.Request) {
 	}
 	if found {
 		// Delete the photo file from evidence directory
-		evidenceDir := appealEvidenceDir(a.ConfigDir, req.Key)
-		os.Remove(filepath.Join(evidenceDir, req.Filename))
+		evidenceDir, err := safeAppealEvidenceDir(a.ConfigDir, req.Key)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := os.Remove(photoPath); err != nil && !os.IsNotExist(err) {
+			writeError(w, http.StatusInternalServerError, "删除图片失败")
+			return
+		}
 		// Remove from JSON arrays
 		newDd := make([]string, 0, len(r2.DdPhotos))
 		for _, f := range r2.DdPhotos {
@@ -347,14 +480,20 @@ func (a *App) DeleteAppealPhoto(w http.ResponseWriter, r *http.Request) {
 			store.setRecord(req.Key, appealRecord{}) // will be omitted on next save? No - need to delete key
 			store.deleteRecord(req.Key)
 			// Clean up empty evidence directory
-			os.Remove(evidenceDir)
+			if err := os.Remove(evidenceDir); err != nil && !os.IsNotExist(err) {
+				writeError(w, http.StatusInternalServerError, "删除图片目录失败")
+				return
+			}
 		} else {
 			store.setRecord(req.Key, r2)
 		}
 		_ = store.save()
 	} else {
 		// Orphaned photo file (not in JSON) - still delete it
-		os.Remove(filepath.Join(appealEvidenceDir(a.ConfigDir, req.Key), req.Filename))
+		if err := os.Remove(photoPath); err != nil && !os.IsNotExist(err) {
+			writeError(w, http.StatusInternalServerError, "删除图片失败")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -683,9 +822,12 @@ func (a *App) loadAppealImages(key string, names []string) []appealImage {
 		return nil
 	}
 	images := make([]appealImage, 0, len(names))
-	dir := appealEvidenceDir(a.ConfigDir, key)
 	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		path, err := safeExistingAppealPhotoPath(a.ConfigDir, key, name)
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -695,7 +837,7 @@ func (a *App) loadAppealImages(key string, names []string) []appealImage {
 		}
 		images = append(images, appealImage{
 			Name: name,
-			Path: filepath.Join(dir, name),
+			Path: path,
 			Data: data,
 		})
 	}
