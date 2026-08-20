@@ -48,6 +48,9 @@ func (a *App) DeleteMultiDeductions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
+	for _, id := range req.IDs {
+		a.CleanupAppealData(id)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "deleted": deleted})
 }
 func (a *App) ListMultiDeductionSubrecords(w http.ResponseWriter, r *http.Request) {

@@ -99,12 +99,71 @@ func (s *appealStore) load() error {
 	if file.Templates != nil {
 		s.records = file.Templates
 	}
+	if s.migrateLegacyKeys() {
+		// Persist the migrated layout immediately so the on-disk JSON matches
+		// the recordID-key format; a failure here is non-fatal, the next save
+		// retries the write.
+		_ = s.saveLocked()
+	}
 	return nil
+}
+
+// migrateLegacyKeys rewrites pre-upgrade keys ("<recordID>_<names>_<sid>") to
+// the recordID-only layout, merging records that used to live under several
+// keys of the same record. It reports whether the map changed.
+func (s *appealStore) migrateLegacyKeys() bool {
+	merged := make(map[string]appealRecord, len(s.records))
+	migrated := false
+	for key, record := range s.records {
+		recordID := appealRecordIDFromKey(key)
+		if recordID != key {
+			migrated = true
+		}
+		if existing, ok := merged[recordID]; ok {
+			merged[recordID] = mergeAppealRecords(existing, record)
+			migrated = true
+		} else {
+			merged[recordID] = record
+		}
+	}
+	if migrated {
+		s.records = merged
+	}
+	return migrated
+}
+
+// mergeAppealRecords unions two appeal records that belong to the same record:
+// non-empty text wins, photo lists are merged without duplicates.
+func mergeAppealRecords(a, b appealRecord) appealRecord {
+	out := a
+	if strings.TrimSpace(out.TextContent) == "" {
+		out.TextContent = b.TextContent
+	}
+	out.DdPhotos = mergePhotoNames(out.DdPhotos, b.DdPhotos)
+	out.AppealPhotos = mergePhotoNames(out.AppealPhotos, b.AppealPhotos)
+	return out
+}
+
+func mergePhotoNames(base, extra []string) []string {
+	seen := make(map[string]bool, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, name := range append(append([]string{}, base...), extra...) {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
 }
 
 func (s *appealStore) save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.saveLocked()
+}
+
+func (s *appealStore) saveLocked() error {
 	file := appealStoreFile{Grade: s.grade, Class: s.class, Templates: s.records}
 	if file.Templates == nil {
 		file.Templates = make(map[string]appealRecord)
@@ -124,27 +183,28 @@ func (s *appealStore) getRecord(key string) (appealRecord, bool) {
 	return r, ok
 }
 
-func (s *appealStore) getRecordByRecordID(recordID string) (string, appealRecord, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prefix := recordID + "_"
-	var fallbackKey string
-	var fallbackRecord appealRecord
-	for key, record := range s.records {
-		if strings.HasPrefix(key, prefix) {
-			if appealRecordHasData(record) {
-				return key, record, true
-			}
-			if fallbackKey == "" {
-				fallbackKey = key
-				fallbackRecord = record
-			}
+func recordContainsPhoto(record appealRecord, filename string) bool {
+	for _, f := range record.DdPhotos {
+		if f == filename {
+			return true
 		}
 	}
-	if fallbackKey != "" {
-		return fallbackKey, fallbackRecord, true
+	for _, f := range record.AppealPhotos {
+		if f == filename {
+			return true
+		}
 	}
-	return "", appealRecord{}, false
+	return false
+}
+
+func removePhotoName(names []string, target string) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if name != target {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func (s *appealStore) deleteRecord(key string) {
@@ -160,6 +220,25 @@ func (s *appealStore) setRecord(key string, r appealRecord) {
 		s.records = make(map[string]appealRecord)
 	}
 	s.records[key] = r
+}
+
+// updateRecord applies mutate to the record under the store lock and persists
+// the result in one critical section, so concurrent read-modify-write
+// sequences (upload / delete / save) never lose updates. The mutate callback
+// returns whether the key should be kept; false drops the record entirely.
+func (s *appealStore) updateRecord(key string, mutate func(*appealRecord) bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.records == nil {
+		s.records = make(map[string]appealRecord)
+	}
+	r := s.records[key]
+	if mutate(&r) {
+		s.records[key] = r
+	} else {
+		delete(s.records, key)
+	}
+	return s.saveLocked()
 }
 
 func (s *appealStore) getGrade() string  { s.mu.Lock(); defer s.mu.Unlock(); return s.grade }
@@ -205,6 +284,52 @@ func safeAppealPhotoName(name string) bool {
 	}
 	ext := strings.ToLower(filepath.Ext(name))
 	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".webp"
+}
+
+// isLowerHex reports whether s is a non-empty run of lowercase hex digits,
+// matching the server-side generated photo name components (nowHexStr/randHex).
+func isLowerHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// safeDeleteAppealPhotoName validates and normalizes a delete-target photo
+// name. Stored photo names are always generated server-side as
+// "<16 lowercase hex>_<6 lowercase hex><ext>", so a delete request must
+// reference exactly that shape. The name is first lowercased and trailing
+// whitespace stripped (matching Windows filename normalization), then checked
+// for path separators, whitespace, "." / ".." markers, a whitelisted
+// extension, and finally that the name matches the generation layout. It
+// returns the normalized name, or "" when the input is not a valid target.
+func safeDeleteAppealPhotoName(raw string) string {
+	name := strings.ToLower(strings.TrimSpace(raw))
+	if name == "" || name == "." || name == ".." {
+		return ""
+	}
+	if strings.ContainsAny(name, "/\\ \t\r\n") {
+		return ""
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".webp":
+	default:
+		return ""
+	}
+	stem := strings.TrimSuffix(name, ext)
+	if len(stem) != 23 || stem[16] != '_' {
+		return ""
+	}
+	if !isLowerHex(stem[:16]) || !isLowerHex(stem[17:]) {
+		return ""
+	}
+	return name
 }
 
 func safeAppealEvidenceDir(configDir, key string) (string, error) {
@@ -268,8 +393,17 @@ func safeExistingAppealPhotoPath(configDir, key, name string) (string, error) {
 	return path, nil
 }
 
+// appealStore returns the process-wide appeal store singleton. All handlers
+// share one instance so the store mutex actually serializes concurrent
+// upload/delete/save operations; the JSON file is loaded (and legacy keys
+// migrated) exactly once, on first use.
 func (a *App) appealStore() *appealStore {
-	return &appealStore{path: filepath.Join(a.ConfigDir, "docx_templates_preferences.json")}
+	a.appealStoreOnce.Do(func() {
+		s := &appealStore{path: filepath.Join(a.ConfigDir, "docx_templates_preferences.json")}
+		_ = s.load()
+		a.appealStoreInst = s
+	})
+	return a.appealStoreInst
 }
 
 // appealConfig is the API response type (merged grade/class + per-record fields)
@@ -283,13 +417,12 @@ type appealConfig struct {
 
 func (a *App) GetAppealConfig(w http.ResponseWriter, r *http.Request) {
 	store := a.appealStore()
-	_ = store.load()
 	key := r.URL.Query().Get("key")
 	if !safeAppealRecordKey(key) {
 		writeError(w, http.StatusBadRequest, "记录标识无效")
 		return
 	}
-	r2, _ := store.getRecord(key)
+	r2, _ := store.getRecord(appealRecordIDFromKey(key))
 	cfg := appealConfig{
 		Grade: store.getGrade(), Class: store.getClass(),
 		TextContent: r2.TextContent, DdPhotos: r2.DdPhotos, AppealPhotos: r2.AppealPhotos,
@@ -312,14 +445,13 @@ func (a *App) SaveAppealConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	store := a.appealStore()
-	_ = store.load()
-	existing, _ := store.getRecord(req.Key)
-	store.setRecord(req.Key, appealRecord{
-		TextContent: req.TextContent, DdPhotos: existing.DdPhotos, AppealPhotos: existing.AppealPhotos,
-	})
+	recordID := appealRecordIDFromKey(req.Key)
 	store.setGrade(req.Grade)
 	store.setClass(req.Class)
-	if err := store.save(); err != nil {
+	if err := store.updateRecord(recordID, func(r *appealRecord) bool {
+		r.TextContent = req.TextContent
+		return true
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
 	}
@@ -332,7 +464,8 @@ func (a *App) UploadAppealPhoto(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "记录标识无效")
 		return
 	}
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 50<<20)
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "文件上传解析失败")
 		return
 	}
@@ -392,18 +525,19 @@ func (a *App) UploadAppealPhoto(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存图片失败")
 		return
 	}
-	// Persist photo reference immediately
+	// Persist photo reference immediately (read-modify-write is atomic on the
+	// shared store, so concurrent uploads never lose a reference).
 	photoType := r.URL.Query().Get("type")
 	store := a.appealStore()
-	_ = store.load()
-	r2, _ := store.getRecord(key)
-	if photoType == "dd" {
-		r2.DdPhotos = append(r2.DdPhotos, name)
-	} else {
-		r2.AppealPhotos = append(r2.AppealPhotos, name)
-	}
-	store.setRecord(key, r2)
-	if err := store.save(); err != nil {
+	recordID := appealRecordIDFromKey(key)
+	if err := store.updateRecord(recordID, func(r *appealRecord) bool {
+		if photoType == "dd" {
+			r.DdPhotos = append(r.DdPhotos, name)
+		} else {
+			r.AppealPhotos = append(r.AppealPhotos, name)
+		}
+		return true
+	}); err != nil {
 		_ = os.Remove(path)
 		writeError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
@@ -419,88 +553,84 @@ func (a *App) DeleteAppealPhoto(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if !safeAppealRecordKey(req.Key) || !safeAppealPhotoName(req.Filename) {
-		writeError(w, http.StatusBadRequest, "图片路径无效")
+	if !safeAppealRecordKey(req.Key) {
+		writeError(w, http.StatusBadRequest, "记录标识无效")
 		return
 	}
-	_, photoPath, err := safeAppealPhotoPath(a.ConfigDir, req.Key, req.Filename)
+	// Strict filename gate: normalized (lowercase, trailing whitespace
+	// stripped), no path separators / whitespace / "." / "..", whitelisted
+	// extension, and the name must match the server-side generated layout.
+	filename := safeDeleteAppealPhotoName(req.Filename)
+	if filename == "" {
+		writeError(w, http.StatusBadRequest, "图片文件名无效")
+		return
+	}
+	_, photoPath, err := safeAppealPhotoPath(a.ConfigDir, req.Key, filename)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// First check JSON record exists and photo is in the arrays
+
 	store := a.appealStore()
-	_ = store.load()
-	r2, ok := store.getRecord(req.Key)
-	found := false
-	if ok {
-		for _, f := range r2.DdPhotos {
-			if f == req.Filename {
-				found = true
-				break
-			}
-		}
-		if !found {
-			for _, f := range r2.AppealPhotos {
-				if f == req.Filename {
-					found = true
-					break
-				}
-			}
-		}
+
+	// The record must exist in the store before anything is deleted, and the
+	// photo must actually be referenced by it (the evidence directory belongs
+	// to the recordID, so an unreferenced filename must never be removed).
+	recordID := appealRecordIDFromKey(req.Key)
+	record, ok := store.getRecord(recordID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "记录不存在")
+		return
 	}
-	if found {
-		// Delete the photo file from evidence directory
-		evidenceDir, err := safeAppealEvidenceDir(a.ConfigDir, req.Key)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if err := os.Remove(photoPath); err != nil && !os.IsNotExist(err) {
-			writeError(w, http.StatusInternalServerError, "删除图片失败")
-			return
-		}
-		// Remove from JSON arrays
-		newDd := make([]string, 0, len(r2.DdPhotos))
-		for _, f := range r2.DdPhotos {
-			if f != req.Filename {
-				newDd = append(newDd, f)
-			}
-		}
-		newAppeal := make([]string, 0, len(r2.AppealPhotos))
-		for _, f := range r2.AppealPhotos {
-			if f != req.Filename {
-				newAppeal = append(newAppeal, f)
-			}
-		}
-		r2.DdPhotos = newDd
-		r2.AppealPhotos = newAppeal
-		// If record is now empty (no photos, no text), remove it entirely
-		if len(newDd) == 0 && len(newAppeal) == 0 && r2.TextContent == "" {
-			store.setRecord(req.Key, appealRecord{}) // will be omitted on next save? No - need to delete key
-			store.deleteRecord(req.Key)
-			// Clean up empty evidence directory
-			if err := os.Remove(evidenceDir); err != nil && !os.IsNotExist(err) {
-				writeError(w, http.StatusInternalServerError, "删除图片目录失败")
-				return
-			}
-		} else {
-			store.setRecord(req.Key, r2)
-		}
-		_ = store.save()
-	} else {
-		// Orphaned photo file (not in JSON) - still delete it
-		if err := os.Remove(photoPath); err != nil && !os.IsNotExist(err) {
-			writeError(w, http.StatusInternalServerError, "删除图片失败")
-			return
+	if !recordContainsPhoto(record, filename) {
+		writeError(w, http.StatusBadRequest, "照片不存在")
+		return
+	}
+	if err := os.Remove(photoPath); err != nil && !os.IsNotExist(err) {
+		writeError(w, http.StatusInternalServerError, "删除图片失败")
+		return
+	}
+	// Atomically remove the reference; when the record becomes empty it is
+	// dropped, and the evidence directory is cleaned up afterwards.
+	var removedEmpty bool
+	if err := store.updateRecord(recordID, func(r *appealRecord) bool {
+		r.DdPhotos = removePhotoName(r.DdPhotos, filename)
+		r.AppealPhotos = removePhotoName(r.AppealPhotos, filename)
+		removedEmpty = !appealRecordHasData(*r)
+		return !removedEmpty
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
+		return
+	}
+	if removedEmpty {
+		// Drop the evidence directory; a leftover directory is cosmetic, so
+		// never fail the request over it.
+		if evidenceDir, dirErr := safeAppealEvidenceDir(a.ConfigDir, req.Key); dirErr == nil {
+			_ = os.Remove(evidenceDir)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// CleanupAppealData removes the appeal config and its evidence directory for a
+// record that no longer exists (e.g. after the deduction record is deleted),
+// so the store and disk never accumulate orphans.
+func (a *App) CleanupAppealData(recordID string) {
+	if !safeAppealRecordKey(recordID) {
+		return
+	}
+	store := a.appealStore()
+	if _, ok := store.getRecord(recordID); ok {
+		store.deleteRecord(recordID)
+		_ = store.save()
+	}
+	if dir, err := safeAppealEvidenceDir(a.ConfigDir, recordID); err == nil {
+		_ = os.RemoveAll(dir)
+	}
+}
+
 func (a *App) ExportAppealZip(w http.ResponseWriter, r *http.Request) {
 	store := a.appealStore()
-	_ = store.load()
 
 	recordID := r.URL.Query().Get("id")
 	if recordID == "" {
@@ -544,7 +674,6 @@ func (a *App) BatchExportAppealZip(w http.ResponseWriter, r *http.Request) {
 	}
 
 	store := a.appealStore()
-	_ = store.load()
 	var items []*appealZipItem
 	createdAny := false
 	for _, id := range append(append([]string{}, req.Single...), req.Multi...) {
@@ -598,24 +727,14 @@ func (a *App) buildAppealZipItem(recordID string, store *appealStore, createMiss
 	if err != nil {
 		return nil, false, err
 	}
-	key := recordID + "_" + recordNames + "_" + firstStudentID(recordStudentIDs)
-	r2, found := store.getRecord(key)
-	if !found || !appealRecordHasData(r2) {
-		existingKey, existingRecord, existingFound := store.getRecordByRecordID(recordID)
-		if existingFound && (!found || appealRecordHasData(existingRecord)) {
-			key, r2, found = existingKey, existingRecord, true
-		}
-	}
-	if !found {
-		key, r2, found = store.getRecordByRecordID(recordID)
-	}
+	// Appeal data is keyed by the record ID alone; the evidence directory is
+	// derived from the same ID, so photos survive record renames/edits.
+	r2, found := store.getRecord(recordID)
 	created := false
-	if !found {
-		if createMissing {
-			store.setRecord(key, appealRecord{})
-			found = true
-			created = true
-		}
+	if !found && createMissing {
+		store.setRecord(recordID, appealRecord{})
+		found = true
+		created = true
 	}
 	grade := store.getGrade()
 	class := store.getClass()
@@ -658,8 +777,8 @@ func (a *App) buildAppealZipItem(recordID string, store *appealStore, createMiss
 	if isSchool {
 		template = schoolAppealTemplate
 	}
-	ddImages := a.loadAppealImages(key, r2.DdPhotos)
-	loadedAppealImages := a.loadAppealImages(key, r2.AppealPhotos)
+	ddImages := a.loadAppealImages(recordID, r2.DdPhotos)
+	loadedAppealImages := a.loadAppealImages(recordID, r2.AppealPhotos)
 	appealImages := loadedAppealImages
 	photoImages := ddImages
 	if isSchool {
@@ -714,15 +833,6 @@ func monthDay(value string) string {
 	}
 	if len(value) > 5 {
 		return strings.Replace(value[5:], "-", ".", 1)
-	}
-	return ""
-}
-
-func firstStudentID(value string) string {
-	for _, part := range strings.Split(value, ",") {
-		if strings.TrimSpace(part) != "" {
-			return strings.TrimSpace(part)
-		}
 	}
 	return ""
 }

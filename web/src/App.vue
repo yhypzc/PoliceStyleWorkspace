@@ -495,12 +495,10 @@ const appealClass = ref('')
 const appealText = ref('')
 const appealDdPhotos = ref<string[]>([])
 const appealAppealPhotos = ref<string[]>([])
-const appealKey = computed(() => {
-  if (!appealRecord.value) return ''
-  const r = appealRecord.value
-  const sid = r.student_ids ? r.student_ids[0] : ''
-  return (r.id || '') + '_' + (r.student_names || '') + '_' + sid
-})
+// Appeal data is keyed by the record ID alone on the server (evidence folders
+// and the JSON store use the same ID), so the key stays stable even when the
+// record's student names or recognition are edited later.
+const appealKey = computed(() => appealRecord.value?.id || '')
 const appealSaving = ref(false)
 const appealExporting = ref(false)
 async function loadWeekRecords() {
@@ -568,7 +566,13 @@ async function batchExportWeekAppeals() {
   }
 }
 async function openAppeal(row: any, type: string) {
-  appealRecord.value = row
+  // 管理页行使用 submit_date/student_name，日常管理行使用 date/student_names，
+  // 统一归一化供申诉弹窗使用
+  appealRecord.value = {
+    ...row,
+    date: row.date || row.submit_date || '',
+    student_names: row.student_names || row.student_name || row.recognized_students || ''
+  }
   appealIsSchool.value = (row.id || '').startsWith('xd_')
   appealSaving.value = true
   try {
@@ -1129,6 +1133,40 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
     <div class="layout-main">
       <header class="top-bar"><strong>{{ page === 'daily-report' ? '警务化管理每日播报' : page === 'password' ? '修改密码' : page === 'daily-management' ? '日常综合管理' : page === 'dorms' ? '寝室管理' : page === 'students' ? '学生管理' : page === 'deductions' ? '常规扣分记录管理' : page === 'multi-deductions' ? '寝室整体差扣分记录管理' : page === 'semester' ? '学期管理' : '工作台' }}</strong><time class="top-bar-clock">{{ currentTimeText }}</time></header>
       <main class="page-area">
+        <!-- 申诉模板导出弹窗：所有页面共享（常规扣分/整体差/日常管理等操作列均可打开） -->
+        <ElDialog v-model="appealDialogVisible" :title="appealIsSchool ? '校督申诉模板导出' : '大队督察申诉模板导出'" width="620px" @close="appealRecord = null">
+          <div v-if="appealRecord" v-loading="appealSaving">
+            <ElForm label-position="top" label-width="auto">
+              <ElFormItem label="日期"><ElInput :model-value="appealRecord.date.slice(5).replace('-', '.')" disabled /></ElFormItem>
+              <ElFormItem label="项目名称"><ElInput :model-value="appealRecord.content" disabled /></ElFormItem>
+              <ElFormItem label="姓名"><ElInput :model-value="appealRecord.student_names" disabled /></ElFormItem>
+              <ElFormItem label="大队"><ElInput v-model="appealGrade" placeholder="大队" /></ElFormItem>
+              <ElFormItem label="区队"><ElInput v-model="appealClass" placeholder="区队" /></ElFormItem>
+              <ElFormItem label="学生复议情况说明"><ElInput v-model="appealText" type="textarea" :rows="3" placeholder="请填写复议情况说明" /></ElFormItem>
+              <template v-if="!appealIsSchool">
+                <ElFormItem label="大督扣分照片">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealDdPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'dd')">×</ElButton></div></div>
+                  <ElButton size="small" @click="uploadAppealPhoto('dd')">上传照片</ElButton>
+                </ElFormItem>
+                <ElFormItem label="申诉照片">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealAppealPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton></div></div>
+                  <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
+                </ElFormItem>
+              </template>
+              <template v-else>
+                <ElFormItem label="申诉照片">
+                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealAppealPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton></div></div>
+                  <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
+                </ElFormItem>
+              </template>
+            </ElForm>
+            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
+              <ElButton @click="appealDialogVisible = false">取消</ElButton>
+              <ElButton type="primary" :loading="appealSaving" @click="saveAppealConfig()">保存</ElButton>
+              <ElButton type="success" :loading="appealExporting" :disabled="appealExporting" @click="exportAppealZip()">{{ appealExporting ? '请稍候...' : '导出' }}</ElButton>
+            </div>
+          </div>
+        </ElDialog>
         <section v-if="page === 'workspace'" class="page-content workspace-page" v-loading="workspaceBusy">
           <div class="workspace-heading"><div><h1>纪检工作台</h1><p>扣分记录与认定情况概览</p></div></div>
           <div class="workspace-stat-grid">
@@ -1197,40 +1235,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
 <div v-else class="daily-score-table-wrap"><div v-if="!dailySummaryVisible" class="daily-discipline-list"><strong>第 {{ (selectedDailyWeek ?? 0) + 1 }} 周个人惩戒名单：</strong><strong v-if="!punishmentList.length">无</strong><template v-else><template v-for="(entry, i) in punishmentList" :key="entry.student_id"><ElButton type="primary" link @click="openPunishmentDetail(entry)">{{ entry.student_name }}</ElButton><span v-if="i < punishmentList.length - 1">、</span></template></template></div><ElTable :data="dailySummaryVisible ? dailySummaryRows : dailyWeekData.rows" :row-class-name="dailySummaryVisible ? undefined : dailyRowClassName" border stripe style="width:100%"><ElTableColumn prop="id" label="学号" width="115" fixed="left" /><ElTableColumn prop="name" label="姓名" width="100" fixed="left" /><ElTableColumn v-if="dailySummaryVisible" prop="total" label="总扣分" width="120" fixed="left"><template #default="{ row }">{{ formatSummaryScore(row.total) }}</template></ElTableColumn><template v-if="dailySummaryVisible"><ElTableColumn v-for="week in dailyWeeks" :key="week.index" :label="`第${week.index + 1}周 (${formatDailyDate(week.start)}~${formatDailyDate(week.end)})`" width="180" align="center"><template #default="{ row }">{{ formatSummaryScore(row.scores[`week_${week.index}`] || 0) }}</template></ElTableColumn></template><template v-else><ElTableColumn v-for="date in dailyWeekData.week.dates" :key="date" :label="formatDailyDate(date)" width="96" align="center"><template #default="{ row }">{{ formatDailyCellScore(row.scores[date] || 0) }}</template></ElTableColumn><ElTableColumn label="个人总计" width="120" fixed="right" align="center"><template #default="{ row }">{{ formatSummaryScore(dailyRowTotal(row)) }}</template></ElTableColumn></template></ElTable></div>
             </div>
           </template>
-          <ElDialog v-model="appealDialogVisible" :title="appealIsSchool ? '校督申诉模板导出' : '大队督察申诉模板导出'" width="620px" @close="appealRecord = null">
-          <div v-if="appealRecord" v-loading="appealSaving">
-            <ElForm label-position="top" label-width="auto">
-              <ElFormItem label="日期"><ElInput :model-value="appealRecord.date.slice(5).replace('-', '.')" disabled /></ElFormItem>
-              <ElFormItem label="项目名称"><ElInput :model-value="appealRecord.content" disabled /></ElFormItem>
-              <ElFormItem label="姓名"><ElInput :model-value="appealRecord.student_names" disabled /></ElFormItem>
-              <ElFormItem label="大队"><ElInput v-model="appealGrade" placeholder="大队" /></ElFormItem>
-              <ElFormItem label="区队"><ElInput v-model="appealClass" placeholder="区队" /></ElFormItem>
-              <ElFormItem label="学生复议情况说明"><ElInput v-model="appealText" type="textarea" :rows="3" placeholder="请填写复议情况说明" /></ElFormItem>
-              <template v-if="!appealIsSchool">
-                <ElFormItem label="大督扣分照片">
-                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealDdPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'dd')">×</ElButton></div></div>
-                  <ElButton size="small" @click="uploadAppealPhoto('dd')">上传照片</ElButton>
-                </ElFormItem>
-                <ElFormItem label="申诉照片">
-                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealAppealPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton></div></div>
-                  <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
-                </ElFormItem>
-              </template>
-              <template v-else>
-                <ElFormItem label="申诉照片">
-                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealAppealPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton></div></div>
-                  <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
-                </ElFormItem>
-              </template>
-            </ElForm>
-            <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
-              <ElButton @click="appealDialogVisible = false">取消</ElButton>
-              <ElButton type="primary" :loading="appealSaving" @click="saveAppealConfig()">保存</ElButton>
-              <ElButton type="success" :loading="appealExporting" :disabled="appealExporting" @click="exportAppealZip()">{{ appealExporting ? '请稍候...' : '导出' }}</ElButton>
-            </div>
-          </div>
-        </ElDialog>
-        <ElDialog v-model="punishmentDetailVisible" :title="selectedPunishmentStudent ? '惩戒人：' + selectedPunishmentStudent.student_name : ''" width="760px">
+          <ElDialog v-model="punishmentDetailVisible" :title="selectedPunishmentStudent ? '惩戒人：' + selectedPunishmentStudent.student_name : ''" width="760px">
                 <div v-if="selectedPunishmentStudent">
                   <p style="margin-bottom:16px;font-size:15px"><strong>计入惩戒分值：</strong>{{ selectedPunishmentStudent.total.toFixed(2) }}</p>
                   <ElTable :data="selectedPunishmentStudent.records" border stripe size="small" style="width:100%">
@@ -1453,7 +1458,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElTableColumn prop="dorm_name" label="寝室名称" width="140" />
               <ElTableColumn prop="content" label="扣分项目" min-width="220" />
               <ElTableColumn prop="score" label="分数" width="90" />
-              <ElTableColumn label="操作" width="300"><template #default="{ row }"><ElButton type="primary" text @click="startEditMultiDeduction(row)">编辑</ElButton><ElButton type="primary" text @click="openSubrecords(row)">子项管理</ElButton><ElButton type="danger" text @click="deleteMultiDeduction(row)">删除</ElButton></template></ElTableColumn>
+              <ElTableColumn label="操作" width="400"><template #default="{ row }"><ElButton type="primary" text @click="startEditMultiDeduction(row)">编辑</ElButton><ElButton type="primary" text @click="openAppeal(row)">导出申诉模板</ElButton><ElButton type="primary" text @click="openSubrecords(row)">子项管理</ElButton><ElButton type="danger" text @click="deleteMultiDeduction(row)">删除</ElButton></template></ElTableColumn>
             </ElTable>
           </div>
           <ElDialog :model-value="!!editingMultiDeduction" title="编辑寝室整体差记录" width="500px" @close="cancelEditMultiDeduction"><ElForm label-position="top" @submit.prevent="submitEditMultiDeduction"><ElFormItem label="日期"><ElInput v-model="multiDeductionForm.submit_date" disabled /></ElFormItem><ElFormItem label="寝室名称"><ElInput v-model="multiDeductionForm.dorm_name" /></ElFormItem><ElFormItem label="扣分项目"><ElInput v-model="multiDeductionForm.content" /></ElFormItem><ElFormItem label="分数"><ElInputNumber v-model="multiDeductionForm.score" :min="0" style="width:100%" /></ElFormItem><div style="display:flex;gap:10px;justify-content:flex-end"><ElButton @click="cancelEditMultiDeduction">取消</ElButton><ElButton type="primary" native-type="submit" :loading="multiDeductionBusy">保存</ElButton></div></ElForm></ElDialog>
@@ -1484,7 +1489,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
           <div class="semester-toolbar">
             <h2 class="semester-title">常规扣分记录管理</h2>
             <div style="display:flex;gap:10px;align-items:center;">
-              <ElInput v-model="deductionSearch" clearable placeholder="搜索记录 ID、姓名、认定、日期、内容或分数" style="width:300px" />
+              <ElInput v-model="deductionSearch" clearable placeholder="搜索记录 ID、姓名、认定、日期、内容或分数" style="width:400px" />
               <ElButton type="primary" class="custom-height" @click="downloadDeductionTemplate">模板下载</ElButton>
               <ElUpload :show-file-list="false" :before-upload="(f) => { importDeductions(f); return false }" accept=".xlsx">
                 <ElButton type="success" class="custom-height" :loading="deductionBusy">导入 Excel</ElButton>
@@ -1514,9 +1519,10 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElTableColumn prop="submit_date" label="日期" width="130" />
               <ElTableColumn prop="content" label="扣分内容" min-width="180" />
               <ElTableColumn prop="score" label="分数" width="80" />
-              <ElTableColumn label="操作" width="160">
+              <ElTableColumn label="操作" width="270">
                 <template #default="{ row }">
                   <ElButton type="primary" text size="small" @click="startEditDeduction(row)">编辑</ElButton>
+                  <ElButton type="primary" text size="small" @click="openAppeal(row)">导出申诉模板</ElButton>
                   <ElButton type="danger" text size="small" @click="deleteDeduction(row)">删除</ElButton>
                 </template>
               </ElTableColumn>

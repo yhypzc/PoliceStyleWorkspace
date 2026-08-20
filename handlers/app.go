@@ -24,6 +24,9 @@ type App struct {
 	httpServer *http.Server
 	stop       func()
 	loginGuard *loginGuard
+
+	appealStoreOnce sync.Once
+	appealStoreInst *appealStore
 }
 
 func NewApp(db *sql.DB, sessions *middleware.SessionStore, logPath string, configDir ...string) *App {

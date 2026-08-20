@@ -85,6 +85,7 @@ func (a *App) DeleteDeductionRecord(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	a.CleanupAppealData(id)
 	log.Printf("[扣分] 删除 ID=%q", id)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -100,6 +101,9 @@ func (a *App) BatchDeleteDeductionRecords(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	for _, id := range req.IDs {
+		a.CleanupAppealData(id)
 	}
 	log.Printf("[扣分] 批量删除 %d 条记录", deleted)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})

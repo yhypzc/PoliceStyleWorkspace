@@ -227,7 +227,7 @@ func (a *App) ExportDailyReportLog(w http.ResponseWriter, r *http.Request) {
 	}
 	for rowIndex, record := range records {
 		row := rowIndex + 2
-		values := []string{record.Date, record.Name, record.Description, record.Points, ""}
+		values := []string{record.Date, record.Name, record.Description, record.Points, a.studentIDsForNames(record.Name)}
 		for columnIndex, value := range values {
 			column, _ := excelize.ColumnNumberToName(columnIndex + 1)
 			_ = file.SetCellValue(sheet, fmt.Sprintf("%s%d", column, row), value)
@@ -276,6 +276,48 @@ func parseDailyReportExportRecords(raw string) ([]dailyReportExportRecord, error
 		}
 	}
 	return records, nil
+}
+
+// splitViolationNames removes all whitespace (including full-width and
+// non-breaking spaces) from the violation-names string, normalizes full-width
+// commas, then splits it on English commas into individual student names.
+func splitViolationNames(value string) []string {
+	value = strings.ReplaceAll(value, " ", "")
+	value = strings.ReplaceAll(value, "\u3000", "")
+	value = strings.ReplaceAll(value, "\u00a0", "")
+	value = strings.ReplaceAll(value, "\t", "")
+	value = strings.ReplaceAll(value, "，", ",")
+	var names []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			names = append(names, part)
+		}
+	}
+	return names
+}
+
+// studentIDsForNames resolves each violation name to its student IDs in the
+// students table and returns them joined by English commas, which matches the
+// "违规学号" column consumed by the import feature. Names without a matching
+// student are skipped; an empty result yields an empty cell.
+func (a *App) studentIDsForNames(names string) string {
+	ids := make([]string, 0, 8)
+	for _, name := range splitViolationNames(names) {
+		rows, err := a.DB.Query(`SELECT id FROM students WHERE stu_name = ?`, name)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err == nil {
+				if id = strings.TrimSpace(id); id != "" {
+					ids = append(ids, id)
+				}
+			}
+		}
+		rows.Close()
+	}
+	return strings.Join(ids, ",")
 }
 
 func dailyReportExportDate(record map[string]any) string {
