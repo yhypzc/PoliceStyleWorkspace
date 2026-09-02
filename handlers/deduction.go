@@ -134,31 +134,40 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
+	imported, errs := a.importDeductionWorkbook(f, false, false)
+	result := map[string]any{"ok": true, "imported": len(imported), "records": imported}
+	if len(errs) > 0 {
+		result["errors"] = errs
+	}
+	log.Printf("[扣分] 批量导入: 成功 %d 条, 失败 %d 条", len(imported), len(errs))
+	writeJSON(w, http.StatusOK, result)
+}
+
+// importDeductionWorkbook parses deduction rows from an opened workbook and
+// inserts them into the regular-deduction tables. It returns the imported
+// records and any per-row failures. When skipExisting is true, rows whose
+// deterministic record ID already exists are treated as already imported and
+// skipped silently (keeps the daily-report auto-import idempotent). When
+// allowUnspecified is true, rows with an empty 违规学号 are imported as
+// "未指定/未认定" records (no student ownership) instead of being rejected;
+// otherwise an empty 违规学号 is an error.
+func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting, allowUnspecified bool) (imported []models.DeductionRecord, errs []string) {
 	sheetName := f.GetSheetName(0)
 	if sheetName == "" {
-		writeError(w, http.StatusBadRequest, "Excel 文件中没有工作表")
-		return
+		return nil, append(errs, "Excel 文件中没有工作表")
 	}
 	rows, err := f.GetRows(sheetName)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "读取工作表失败")
-		return
+		return nil, append(errs, "读取工作表失败: "+err.Error())
 	}
 	if len(rows) < 2 {
-		writeError(w, http.StatusBadRequest, "Excel 文件中没有数据行（除表头外至少需要一行数据）")
-		return
+		return nil, append(errs, "Excel 文件中没有数据行（除表头外至少需要一行数据）")
 	}
-
 	headerRowIndex, dateCol, nameCol, studentIDCol, contentCol, scoreCol := findDeductionHeader(rows)
 	if headerRowIndex < 0 {
-		writeError(w, http.StatusBadRequest, "表头必须包含「学号」列")
-		return
+		return nil, append(errs, "表头必须包含「学号」列")
 	}
-
-	var imported []models.DeductionRecord
-	var errors []string
 	isSchoolSupervision := isSchoolSupervisionWorkbook(rows[headerRowIndex+1:], dateCol)
-
 	for i := headerRowIndex + 1; i < len(rows); i++ {
 		row := rows[i]
 		get := func(col int) string {
@@ -176,10 +185,6 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 		if studentID == "" && content == "" {
 			continue
 		}
-		if studentID == "" {
-			errors = append(errors, fmt.Sprintf("第 %d 行: 学号为空", i+1))
-			continue
-		}
 
 		var score float64
 		if scoreStr != "" {
@@ -188,7 +193,7 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 		if isSchoolSupervision {
 			convertedDate, err := schoolSupervisionDate(date)
 			if err != nil {
-				errors = append(errors, fmt.Sprintf("第 %d 行: %s", i+1, err.Error()))
+				errs = append(errs, fmt.Sprintf("第 %d 行: %s", i+1, err.Error()))
 				continue
 			}
 			date = convertedDate
@@ -204,20 +209,41 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 			Score:             score,
 			SchoolSupervision: isSchoolSupervision,
 		}
+		if studentID == "" {
+			// 无违规学号：默认要求必填；仅当允许未指定导入时，作为
+			// "未指定/未认定"记录（无学生归属）入库，供后续认定。
+			if !allowUnspecified {
+				errs = append(errs, fmt.Sprintf("第 %d 行: 学号为空", i+1))
+				continue
+			}
+			rec, err := models.CreateUnassignedDeductionRecord(a.DB, r)
+			if err != nil {
+				if skipExisting && isDeductionDuplicateError(err) {
+					continue
+				}
+				errs = append(errs, fmt.Sprintf("第 %d 行: %s", i+1, err.Error()))
+				continue
+			}
+			imported = append(imported, *rec)
+			continue
+		}
+
 		rec, err := models.CreateDeductionRecordForStudents(a.DB, r, studentID)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("第 %d 行: %s", i+1, err.Error()))
+			if skipExisting && isDeductionDuplicateError(err) {
+				continue
+			}
+			errs = append(errs, fmt.Sprintf("第 %d 行: %s", i+1, err.Error()))
 			continue
 		}
 		imported = append(imported, *rec)
 	}
+	return imported, errs
+}
 
-	result := map[string]any{"ok": true, "imported": len(imported), "records": imported}
-	if len(errors) > 0 {
-		result["errors"] = errors
-	}
-	log.Printf("[扣分] 批量导入: 成功 %d 条, 失败 %d 条", len(imported), len(errors))
-	writeJSON(w, http.StatusOK, result)
+func isDeductionDuplicateError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unique constraint") || strings.Contains(msg, "已存在")
 }
 
 var monthDayPattern = regexp.MustCompile(`^(\d{1,2})\.(\d{1,2})$`)

@@ -138,7 +138,10 @@ func (a *App) runDailyReport(today string, requireEnabled bool) error {
 	if sent == 0 {
 		return fmt.Errorf("没有启用的钉钉机器人")
 	}
-	
+
+	// 每日播报日志入库之后：若配置开启自动入库，把本批抓取记录导入常规扣分表
+	a.autoImportDailyReportRecords(config, responseRaw)
+
 	if len(failures) > 0 {
 		return fmt.Errorf("daily report failures: %s", strings.Join(failures, "; "))
 	}

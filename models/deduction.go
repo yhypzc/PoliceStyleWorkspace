@@ -114,6 +114,26 @@ func CreateDeductionRecord(db *sql.DB, r DeductionRecord) (*DeductionRecord, err
 	return &r, nil
 }
 
+// CreateUnassignedDeductionRecord inserts a single deduction record without
+// any student ownership, representing the local "未指定/未认定" item that the
+// workspace lists for later recognition/assignment. studentName may be empty.
+func CreateUnassignedDeductionRecord(db *sql.DB, r DeductionRecord) (*DeductionRecord, error) {
+	r.StudentID = ""
+	r.StudentName = strings.TrimSpace(r.StudentName)
+	r.ID = generateDeductionRecordID(r)
+	_, err := db.Exec(
+		`INSERT INTO police_style_records_single_subrecords (id, submit_date, student_name, content, score) VALUES (?, ?, ?, ?, ?)`,
+		r.ID, r.SubmitDate, r.StudentName, r.Content, r.Score,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") {
+			return nil, fmt.Errorf("记录ID %q 已存在", r.ID)
+		}
+		return nil, fmt.Errorf("创建未指定扣分记录失败: %w", err)
+	}
+	return &r, nil
+}
+
 // CreateDeductionRecordForStudents records a violation against one or more existing students.
 // The record and ownership mapping are committed atomically.
 func CreateDeductionRecordForStudents(db *sql.DB, r DeductionRecord, studentIDs string) (*DeductionRecord, error) {

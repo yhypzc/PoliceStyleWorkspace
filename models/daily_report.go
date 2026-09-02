@@ -24,6 +24,7 @@ type DailyReportConfig struct {
 	PoliceProxySession string `json:"-"`
 	FetchTime          string `json:"fetch_time_everyday"`
 	SetStatus          int    `json:"set_status"`
+	AutoImport         int    `json:"auto_import"`
 }
 type DingTalkRobot struct {
 	Name      string `json:"robot_name"`
@@ -43,11 +44,42 @@ type DailyReportLog struct {
 }
 
 func CreateDailyReportTables(db *sql.DB) error {
-	_, err := db.Exec(`PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS daily_report_config(aes_key BLOB PRIMARY KEY, vpn_login_url TEXT, username_vpn TEXT, password_vpn BLOB, vpn_police_style_server_url TEXT, username_police_style_server TEXT, password_police_style_server BLOB, fetch_time_everyday TEXT, set_status INT); CREATE TABLE IF NOT EXISTS dingtalk_webbook_robots(robot_name TEXT PRIMARY KEY, dingtalk_webbook_url BLOB, dingtalk_webbook_password BLOB, set_status INT, aes_key BLOB, FOREIGN KEY(aes_key) REFERENCES daily_report_config(aes_key)); CREATE TABLE IF NOT EXISTS daily_report_cache(id TEXT PRIMARY KEY, response_raw TEXT); CREATE TABLE IF NOT EXISTS daily_report_auto_run(run_key TEXT PRIMARY KEY, op_time TEXT)`)
+	_, err := db.Exec(`PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS daily_report_config(aes_key BLOB PRIMARY KEY, vpn_login_url TEXT, username_vpn TEXT, password_vpn BLOB, vpn_police_style_server_url TEXT, username_police_style_server TEXT, password_police_style_server BLOB, fetch_time_everyday TEXT, set_status INT, auto_import INT DEFAULT 0); CREATE TABLE IF NOT EXISTS dingtalk_webbook_robots(robot_name TEXT PRIMARY KEY, dingtalk_webbook_url BLOB, dingtalk_webbook_password BLOB, set_status INT, aes_key BLOB, FOREIGN KEY(aes_key) REFERENCES daily_report_config(aes_key)); CREATE TABLE IF NOT EXISTS daily_report_cache(id TEXT PRIMARY KEY, response_raw TEXT); CREATE TABLE IF NOT EXISTS daily_report_auto_run(run_key TEXT PRIMARY KEY, op_time TEXT)`)
 	if err != nil {
 		return err
 	}
 	_, err = db.Exec(createDailyReportLogSQL)
+	if err != nil {
+		return err
+	}
+	return ensureDailyReportConfigColumn(db)
+}
+
+// ensureDailyReportConfigColumn adds the auto_import column to an existing
+// daily_report_config table created before that feature was introduced.
+func ensureDailyReportConfigColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(daily_report_config)`)
+	if err != nil {
+		return err
+	}
+	has := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "auto_import" {
+			has = true
+		}
+	}
+	rows.Close()
+	if has {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE daily_report_config ADD COLUMN auto_import INT DEFAULT 0`)
 	return err
 }
 
@@ -108,7 +140,7 @@ func decryptReport(key, data []byte) (string, error) {
 func GetDailyReportConfig(db *sql.DB) (*DailyReportConfig, error) {
 	var c DailyReportConfig
 	var p, pp []byte
-	err := db.QueryRow(`SELECT aes_key,vpn_login_url,username_vpn,password_vpn,vpn_police_style_server_url,username_police_style_server,password_police_style_server,fetch_time_everyday,set_status FROM daily_report_config LIMIT 1`).Scan(&c.AESKey, &c.VPNLoginURL, &c.UsernameVPN, &p, &c.PoliceURL, &c.UsernamePolice, &pp, &c.FetchTime, &c.SetStatus)
+	err := db.QueryRow(`SELECT aes_key,vpn_login_url,username_vpn,password_vpn,vpn_police_style_server_url,username_police_style_server,password_police_style_server,fetch_time_everyday,set_status,auto_import FROM daily_report_config LIMIT 1`).Scan(&c.AESKey, &c.VPNLoginURL, &c.UsernameVPN, &p, &c.PoliceURL, &c.UsernamePolice, &pp, &c.FetchTime, &c.SetStatus, &c.AutoImport)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -148,7 +180,8 @@ func SaveDailyReportConfig(db *sql.DB, c DailyReportConfig) error {
 			username_police_style_server = ?,
 			password_police_style_server = ?,
 			fetch_time_everyday = ?,
-			set_status = ?
+			set_status = ?,
+			auto_import = ?
 		WHERE aes_key = ?`,
 		c.VPNLoginURL,
 		c.UsernameVPN,
@@ -158,6 +191,7 @@ func SaveDailyReportConfig(db *sql.DB, c DailyReportConfig) error {
 		pp,
 		c.FetchTime,
 		c.SetStatus,
+		c.AutoImport,
 		key,
 	)
 	if err != nil {
@@ -178,8 +212,9 @@ func SaveDailyReportConfig(db *sql.DB, c DailyReportConfig) error {
 				username_police_style_server,
 				password_police_style_server,
 				fetch_time_everyday,
-				set_status
-			) VALUES(?,?,?,?,?,?,?,?,?)`,
+				set_status,
+				auto_import
+			) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 			key,
 			c.VPNLoginURL,
 			c.UsernameVPN,
@@ -189,6 +224,7 @@ func SaveDailyReportConfig(db *sql.DB, c DailyReportConfig) error {
 			pp,
 			c.FetchTime,
 			c.SetStatus,
+			c.AutoImport,
 		); err != nil {
 			return err
 		}

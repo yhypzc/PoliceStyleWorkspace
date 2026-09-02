@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -225,8 +226,25 @@ func (a *App) ExportDailyReportLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	file := excelize.NewFile()
+	file, err := a.buildDailyReportExportFile(records)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "生成表格失败: "+err.Error())
+		return
+	}
 	defer file.Close()
+
+	filename := "警务化扣分记录.xlsx"
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+url.QueryEscape(filename))
+	_ = file.Write(w)
+}
+
+// buildDailyReportExportFile renders daily report records into an in-memory
+// XLSX workbook with the headers the deduction import feature recognizes
+// (日期/姓名/扣分项目/分数/违规学号). The same builder is reused by the
+// export endpoint and by the auto-import feature after a broadcast is stored.
+func (a *App) buildDailyReportExportFile(records []dailyReportExportRecord) (*excelize.File, error) {
+	file := excelize.NewFile()
 	sheet := file.GetSheetName(0)
 	headers := []string{"日期", "姓名", "扣分项目", "分数", "违规学号"}
 	for index, header := range headers {
@@ -246,11 +264,39 @@ func (a *App) ExportDailyReportLog(w http.ResponseWriter, r *http.Request) {
 	_ = file.SetColWidth(sheet, "C", "C", 36)
 	_ = file.SetColWidth(sheet, "D", "D", 12)
 	_ = file.SetColWidth(sheet, "E", "E", 18)
+	return file, nil
+}
 
-	filename := "警务化扣分记录.xlsx"
-	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-	w.Header().Set("Content-Disposition", `attachment; filename*=UTF-8''`+url.QueryEscape(filename))
-	_ = file.Write(w)
+// autoImportDailyReportRecords runs after a daily report log is stored: when
+// the broadcast config has auto_import enabled, it turns the fetched records
+// into an in-memory XLSX (reusing the export table builder) and imports them
+// into the regular-deduction tables (reusing the import parser). Duplicate
+// records (deterministic IDs) are skipped so repeated broadcasts stay
+// idempotent; rows whose names cannot be resolved to a local student ID are
+// skipped and reported in the log.
+func (a *App) autoImportDailyReportRecords(config *models.DailyReportConfig, responseRaw string) {
+	if config == nil || config.AutoImport == 0 {
+		return
+	}
+	records, err := parseDailyReportExportRecords(responseRaw)
+	if err != nil {
+		log.Printf("[每日播报] 自动入库跳过（抓取数据解析失败）: %v", err)
+		return
+	}
+	if len(records) == 0 {
+		return
+	}
+	file, err := a.buildDailyReportExportFile(records)
+	if err != nil {
+		log.Printf("[每日播报] 自动入库失败（生成内存表格）: %v", err)
+		return
+	}
+	imported, errs := a.importDeductionWorkbook(file, true, true)
+	_ = file.Close()
+	log.Printf("[每日播报] 自动入库完成: 待导入 %d 条(已剔除 state=4/7 的已申诉记录), 实际导入 %d 条", len(records), len(imported))
+	for _, e := range errs {
+		log.Printf("[每日播报] 自动入库忽略一行: %s", e)
+	}
 }
 
 type dailyReportExportRecord struct {
@@ -275,6 +321,13 @@ func parseDailyReportExportRecords(raw string) ([]dailyReportExportRecord, error
 	records := make([]dailyReportExportRecord, 0, len(payload.SquadRecords)+len(payload.WaitRecords))
 	for _, group := range [][]map[string]any{payload.SquadRecords, payload.WaitRecords} {
 		for _, item := range group {
+			// 平台 state 语义（用户确认）：0=未申诉, 4=申诉成功, 6=申诉失败, 7=已删除。
+			// 只过滤 4(申诉成功，扣分已作废) 和 7(记录已删除)；0 正常导入、
+			// 6(申诉失败，扣分仍生效) 及其它未知状态一律保留导入。
+			switch valueString(item["state"]) {
+			case "4", "7":
+				continue
+			}
 			records = append(records, dailyReportExportRecord{
 				Date:        dailyReportExportDate(item),
 				Name:        firstValueString(item, "violation_names", "student_name", "name", "names"),
