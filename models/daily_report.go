@@ -431,6 +431,25 @@ func DeleteDailyReportLog(db *sql.DB, robotName, opTime string) error {
 	return tx.Commit()
 }
 
+// ClearDailyReportLogs removes every broadcast log row and every raw
+// response cache row. Because daily_report_log.raw_id references
+// daily_report_cache.id, logs are deleted before the cache.
+func ClearDailyReportLogs(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM daily_report_log`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM daily_report_cache`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func DailyReportRawByLog(db *sql.DB, robotName, opTime string) (string, error) {
 	var responseRaw string
 	err := db.QueryRow(

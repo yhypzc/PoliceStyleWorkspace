@@ -340,11 +340,24 @@ func safeAppealEvidenceDir(configDir, key string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("解析配置目录失败: %w", err)
 	}
+	// Windows 下 EvalSymlinks 会把 8.3 短名展开为长名；若 root 仍是短名，
+	// pathWithin 的字典比较会误判越界。这里把 root 也统一为最终磁盘形式。
+	root = canonicalDir(root)
 	dir := filepath.Join(root, "evidence_"+appealRecordIDFromKey(key))
 	if filepath.Dir(dir) != root {
 		return "", fmt.Errorf("申诉证据目录越界")
 	}
 	return dir, nil
+}
+
+// canonicalDir resolves a path to its final on-disk form (expanding 8.3
+// short-name components on Windows) so lexical comparisons like pathWithin
+// compare like with like. Falls back to the input path when resolution fails.
+func canonicalDir(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	return path
 }
 
 func pathWithin(base, target string) bool {
@@ -379,6 +392,7 @@ func safeExistingAppealPhotoPath(configDir, key, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	root = canonicalDir(root)
 	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return "", err
@@ -508,6 +522,7 @@ func (a *App) UploadAppealPhoto(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "解析图片目录失败")
 		return
 	}
+	root = canonicalDir(root)
 	realDir, err := filepath.EvalSymlinks(dir)
 	if err != nil || !pathWithin(root, realDir) {
 		writeError(w, http.StatusBadRequest, "图片目录路径无效")

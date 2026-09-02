@@ -169,6 +169,14 @@ func (a *App) ListDailyReportLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "logs": logs})
 }
 
+func (a *App) ClearDailyReportLogs(w http.ResponseWriter, r *http.Request) {
+	if err := models.ClearDailyReportLogs(a.DB); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (a *App) DeleteDailyReportLog(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RobotName string `json:"robot_name"`

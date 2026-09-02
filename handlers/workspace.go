@@ -227,7 +227,9 @@ func (a *App) ExportDailyManagementWeek(w http.ResponseWriter, r *http.Request) 
 			total += score
 			col, _ := excelize.ColumnNumberToName(i + 3)
 			_ = file.SetCellStyle(sheet, fmt.Sprintf("%s%d", col, excelRow), fmt.Sprintf("%s%d", col, excelRow), decimalStyle)
-			file.SetCellValue(sheet, fmt.Sprintf("%s%d", col, excelRow), score)
+			if score != 0 {
+				file.SetCellValue(sheet, fmt.Sprintf("%s%d", col, excelRow), score)
+			}
 		}
 		_ = file.SetCellStyle(sheet, fmt.Sprintf("%s%d", totalCol, excelRow), fmt.Sprintf("%s%d", totalCol, excelRow), decimalStyle)
 		file.SetCellValue(sheet, fmt.Sprintf("%s%d", totalCol, excelRow), total)
@@ -344,18 +346,45 @@ func (a *App) fillDailyExportDetails(file *excelize.File, start, end time.Time) 
 			detailDecimalStyle = id
 		}
 	}
-	students, err := models.ListStudents(a.DB)
+	rows, err := a.deductionDetailRows(start, end)
 	if err != nil {
 		return err
+	}
+	for i, detail := range rows {
+		excelRow := i + 2
+		_ = file.SetCellStyle(sheet, fmt.Sprintf("A%d", excelRow), fmt.Sprintf("C%d", excelRow), detailTextStyle)
+		_ = file.SetCellStyle(sheet, fmt.Sprintf("D%d", excelRow), fmt.Sprintf("D%d", excelRow), detailDecimalStyle)
+		file.SetCellValue(sheet, fmt.Sprintf("A%d", excelRow), detail.Date)
+		file.SetCellValue(sheet, fmt.Sprintf("B%d", excelRow), detail.Name)
+		file.SetCellValue(sheet, fmt.Sprintf("C%d", excelRow), detail.Content)
+		file.SetCellValue(sheet, fmt.Sprintf("D%d", excelRow), detail.Score)
+	}
+	return nil
+}
+
+type deductionDetailRow struct {
+	Date    string
+	Name    string
+	Content string
+	Score   float64
+}
+
+// deductionDetailRows returns one row per student deduction (single and multi)
+// falling inside [start, end), with per-student shares computed the same way
+// as the weekly export's detail sheet.
+func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, error) {
+	students, err := models.ListStudents(a.DB)
+	if err != nil {
+		return nil, err
 	}
 	names := make(map[string]string, len(students))
 	for _, student := range students {
 		names[student.ID] = student.Name
 	}
-	row := 2
+	rows := make([]deductionDetailRow, 0)
 	single, err := models.ListDeductionRecords(a.DB)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, record := range single {
 		date, ok := recordDate(record.SubmitDate)
@@ -364,18 +393,12 @@ func (a *App) fillDailyExportDetails(file *excelize.File, start, end time.Time) 
 		}
 		share := record.Score / float64(len(record.RecognizedStudentIDs))
 		for _, studentID := range record.RecognizedStudentIDs {
-			_ = file.SetCellStyle(sheet, fmt.Sprintf("A%d", row), fmt.Sprintf("C%d", row), detailTextStyle)
-			_ = file.SetCellStyle(sheet, fmt.Sprintf("D%d", row), fmt.Sprintf("D%d", row), detailDecimalStyle)
-			file.SetCellValue(sheet, fmt.Sprintf("A%d", row), date.Format("2006-01-02"))
-			file.SetCellValue(sheet, fmt.Sprintf("B%d", row), names[studentID])
-			file.SetCellValue(sheet, fmt.Sprintf("C%d", row), record.Content)
-			file.SetCellValue(sheet, fmt.Sprintf("D%d", row), share)
-			row++
+			rows = append(rows, deductionDetailRow{Date: date.Format("2006-01-02"), Name: names[studentID], Content: record.Content, Score: share})
 		}
 	}
 	multi, err := models.ListMultiDeductionRecords(a.DB)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, record := range multi {
 		date, ok := recordDate(record.SubmitDate)
@@ -384,7 +407,7 @@ func (a *App) fillDailyExportDetails(file *excelize.File, start, end time.Time) 
 		}
 		subs, err := models.ListMultiDeductionSubrecords(a.DB, record.ID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if len(subs) == 0 {
 			continue
@@ -395,15 +418,39 @@ func (a *App) fillDailyExportDetails(file *excelize.File, start, end time.Time) 
 			}
 			share := record.Score / float64(len(subs)) / float64(len(sub.StudentIDs))
 			for _, studentID := range sub.StudentIDs {
-				_ = file.SetCellStyle(sheet, fmt.Sprintf("A%d", row), fmt.Sprintf("C%d", row), detailTextStyle)
-				_ = file.SetCellStyle(sheet, fmt.Sprintf("D%d", row), fmt.Sprintf("D%d", row), detailDecimalStyle)
-				file.SetCellValue(sheet, fmt.Sprintf("A%d", row), date.Format("2006-01-02"))
-				file.SetCellValue(sheet, fmt.Sprintf("B%d", row), names[studentID])
-				file.SetCellValue(sheet, fmt.Sprintf("C%d", row), sub.Content)
-				file.SetCellValue(sheet, fmt.Sprintf("D%d", row), share)
-				row++
+				rows = append(rows, deductionDetailRow{Date: date.Format("2006-01-02"), Name: names[studentID], Content: record.Content + "_" + sub.Content, Score: share})
 			}
 		}
+	}
+	return rows, nil
+}
+
+// addDeductionDetailsSheet appends a worksheet holding the deduction records
+// in the same 时间/姓名/项目/分数 layout as the weekly export's detail sheet.
+func (a *App) addDeductionDetailsSheet(file *excelize.File, start, end time.Time) error {
+	sheetIndex, err := file.NewSheet("扣分记录")
+	if err != nil {
+		return err
+	}
+	sheet := file.GetSheetName(sheetIndex)
+	for i, header := range []string{"时间", "姓名", "项目", "分数"} {
+		cell, _ := excelize.ColumnNumberToName(i + 1)
+		file.SetCellValue(sheet, fmt.Sprintf("%s1", cell), header)
+	}
+	_ = file.SetColWidth(sheet, "A", "A", 18.45)
+	_ = file.SetColWidth(sheet, "B", "B", 15.63)
+	_ = file.SetColWidth(sheet, "C", "C", 25.36)
+	_ = file.SetColWidth(sheet, "D", "D", 8.73)
+	rows, err := a.deductionDetailRows(start, end)
+	if err != nil {
+		return err
+	}
+	for i, detail := range rows {
+		excelRow := i + 2
+		file.SetCellValue(sheet, fmt.Sprintf("A%d", excelRow), detail.Date)
+		file.SetCellValue(sheet, fmt.Sprintf("B%d", excelRow), detail.Name)
+		file.SetCellValue(sheet, fmt.Sprintf("C%d", excelRow), detail.Content)
+		file.SetCellValue(sheet, fmt.Sprintf("D%d", excelRow), detail.Score)
 	}
 	return nil
 }
@@ -479,6 +526,10 @@ func (a *App) ExportDailyManagementSummary(w http.ResponseWriter, r *http.Reques
 			col, _ := excelize.ColumnNumberToName(i + 4)
 			file.SetCellValue(sheet, fmt.Sprintf("%s%d", col, excelRow), row.Scores[fmt.Sprintf("week_%d", i)])
 		}
+	}
+	if err := a.addDeductionDetailsSheet(file, start, end); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	a.writeXLSX(w, file, fmt.Sprintf("%s-学期汇总.xlsx", semester.Name))
 }

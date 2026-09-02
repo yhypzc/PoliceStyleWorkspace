@@ -122,6 +122,7 @@ func main() {
 	mux.Handle("DELETE /api/daily-report/robots", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.DeleteDingTalkRobot)))
 	mux.Handle("GET /api/daily-report/logs", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ListDailyReportLogs)))
 	mux.Handle("DELETE /api/daily-report/logs", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.DeleteDailyReportLog)))
+	mux.Handle("DELETE /api/daily-report/logs/all", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ClearDailyReportLogs)))
 	mux.Handle("GET /api/daily-report/logs/export", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ExportDailyReportLog)))
 	mux.Handle("POST /api/daily-report/run", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.RunDailyReportNow)))
 	mux.Handle("POST /api/logout", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.Logout)))

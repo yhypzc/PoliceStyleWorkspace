@@ -81,6 +81,21 @@ async function deleteReportLog(row:any){
     dailyReportBusy.value = false
   }
 }
+async function clearReportLogs(){
+  try {
+    await ElMessageBox.confirm('确定清空所有播报日志及缓存数据吗？此操作不可恢复。', '确认清空日志', { type: 'warning', confirmButtonText: '清空', cancelButtonText: '取消' })
+  } catch { return }
+  dailyReportBusy.value = true
+  try {
+    await api('/api/daily-report/logs/all', { method: 'DELETE' })
+    reportLogs.value = []
+    ElMessage.success('播报日志已清空')
+  } catch (error:any) {
+    ElMessage.error(error.message)
+  } finally {
+    dailyReportBusy.value = false
+  }
+}
 async function runDailyReport(){
   if (dailyReportBusy.value) return
   dailyReportBusy.value = true
@@ -484,6 +499,22 @@ const weekRecordsBusy = ref(false)
 const weekBatchSingleIDs = ref<string[]>([])
 const weekBatchMultiIDs = ref<string[]>([])
 const weekBatchExportBusy = ref(false)
+const weekRecordsSearch = ref('')
+const filteredWeekSingle = computed(() => {
+  const kw = weekRecordsSearch.value.trim().toLowerCase()
+  if (!kw) return weekRecords.value.single
+  return weekRecords.value.single.filter(row =>
+    [row.id, row.date, row.content, String(row.score), row.student_names].some(v => v && v.toLowerCase().includes(kw))
+  )
+})
+const filteredWeekMulti = computed(() => {
+  const kw = weekRecordsSearch.value.trim().toLowerCase()
+  if (!kw) return weekRecords.value.multi
+  return weekRecords.value.multi.filter(row => {
+    const subText = (row.subs || []).map(s => `${s.content} ${s.student_names}`).join(' ')
+    return [row.id, row.date, row.content, String(row.score), subText].some(v => v && v.toLowerCase().includes(kw))
+  })
+})
 
 // ── Appeal dialog state ──
 const appealDialogVisible = ref(false)
@@ -525,10 +556,10 @@ function toggleWeekMulti(id: string, checked: boolean) {
     : weekBatchMultiIDs.value.filter(item => item !== id)
 }
 function toggleAllWeekSingle(checked: boolean) {
-  weekBatchSingleIDs.value = checked ? weekRecords.value.single.map(row => row.id) : []
+  weekBatchSingleIDs.value = checked ? filteredWeekSingle.value.map(row => row.id) : []
 }
 function toggleAllWeekMulti(checked: boolean) {
-  weekBatchMultiIDs.value = checked ? weekRecords.value.multi.map(row => row.id) : []
+  weekBatchMultiIDs.value = checked ? filteredWeekMulti.value.map(row => row.id) : []
 }
 async function batchExportWeekAppeals() {
   const single = [...weekBatchSingleIDs.value]
@@ -956,7 +987,8 @@ async function submitEditDeduction() {
   if (!editingDeduction.value) return
   deductionBusy.value = true
   try {
-    await api(`/api/deductions/${editingDeduction.value.id}`, { method: 'PUT', body: JSON.stringify(deductionEditForm) })
+    const payload = { ...deductionEditForm, score: Number(deductionEditForm.score) }
+    await api(`/api/deductions/${editingDeduction.value.id}`, { method: 'PUT', body: JSON.stringify(payload) })
     ElMessage.success('记录已更新')
     cancelEditDeduction()
     await loadDeductions()
@@ -1188,7 +1220,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
         <section v-else-if="page === 'daily-report'" class="page-content art-card">
           <div class="semester-toolbar"><h2 class="semester-title">警务化管理每日播报</h2><div style="display:flex;gap:10px"><span style="font-size:0.75em">全局{{ reportConfig.set_status ? '启用' : '禁用' }}</span><ElButton :disabled="dailyReportBusy" @click="reportDateVisible=true">选择日期播报</ElButton><ElButton :loading="dailyReportBusy" :disabled="dailyReportBusy" @click="runDailyReport">{{ dailyReportBusy ? '请稍候' : '立即播报' }}</ElButton><ElButton @click="reportConfigVisible=true">播报配置</ElButton><ElButton @click="robotVisible=true">钉钉机器人管理</ElButton></div></div>
           <div class="daily-semester-grid"><article v-for="robot in reportRobots" :key="robot.robot_name" class="daily-semester-card"><span>钉钉机器人</span><strong>{{ robot.robot_name }}</strong><small>{{ robot.set_status ? '已启用' : '已禁用' }}</small></article></div>
-          <section class="workspace-record-section" style="margin-top:24px"><h3>播报日志</h3><ElTable :data="reportLogs" border stripe max-height="360"><ElTableColumn prop="op_time" label="操作时间" width="190" /><ElTableColumn prop="robot_name" label="机器人名称" width="160" /><ElTableColumn prop="op_status" label="播报状态" width="140" /><ElTableColumn prop="fetch_content" label="播报内容" min-width="360" show-overflow-tooltip /><ElTableColumn label="操作" width="170" fixed="right"><template #default="{ row }"><ElButton type="primary" text @click="exportReportLog(row)">导出记录</ElButton><ElButton type="danger" text @click="deleteReportLog(row)">删除</ElButton></template></ElTableColumn></ElTable></section>
+          <section class="workspace-record-section" style="margin-top:24px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:10px"><h3 style="margin:0">播报日志</h3><div style="flex:1"></div><ElButton type="danger" plain :disabled="dailyReportBusy" @click="clearReportLogs">清空日志</ElButton></div><ElTable :data="reportLogs" border stripe max-height="360"><ElTableColumn prop="op_time" label="操作时间" width="190" /><ElTableColumn prop="robot_name" label="机器人名称" width="160" /><ElTableColumn prop="op_status" label="播报状态" width="140" /><ElTableColumn prop="fetch_content" label="播报内容" min-width="360" show-overflow-tooltip /><ElTableColumn label="操作" width="170" fixed="right"><template #default="{ row }"><ElButton type="primary" text @click="exportReportLog(row)">导出记录</ElButton><ElButton type="danger" text @click="deleteReportLog(row)">删除</ElButton></template></ElTableColumn></ElTable></section>
           <ElDialog v-model="reportDateVisible" title="选择日期播报" width="420px"><ElForm label-position="top"><ElFormItem label="播报日期"><ElDatePicker v-model="selectedReportDate" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" /></ElFormItem></ElForm><template #footer><ElButton @click="reportDateVisible=false">取消</ElButton><ElButton type="primary" :loading="dailyReportBusy" @click="runDailyReportForDate">确认播报</ElButton></template></ElDialog>
           <ElDialog v-model="reportConfigVisible" title="播报配置" width="600px"><ElForm label-position="top"><ElFormItem label="全局状态"><ElSwitch v-model="reportConfig.set_status" :active-value="1" :inactive-value="0" active-text="全局启用" inactive-text="全局禁用" /></ElFormItem><ElFormItem label="VPN 登录地址"><ElInput v-model="reportConfig.vpn_login_url" /></ElFormItem><ElFormItem label="VPN 用户名"><ElInput v-model="reportConfig.username_vpn" /></ElFormItem><ElFormItem label="VPN 密码"><ElInput v-model="reportConfig.password_vpn" show-password /></ElFormItem><ElFormItem label="内网警务化管理服务器地址"><ElInput v-model="reportConfig.vpn_police_style_server_url" /></ElFormItem><ElFormItem label="服务器用户名"><ElInput v-model="reportConfig.username_police_style_server" /></ElFormItem><ElFormItem label="服务器密码"><ElInput v-model="reportConfig.password_police_style_server" show-password /></ElFormItem><ElFormItem label="每日播报时间"><ElTimePicker v-model="reportConfig.fetch_time_everyday" format="HH:mm" value-format="HH:mm" /></ElFormItem></ElForm><template #footer><ElButton @click="reportConfigVisible=false">取消</ElButton><ElButton type="primary" @click="saveDailyReport();reportConfigVisible=false">保存</ElButton></template></ElDialog>
           <ElDialog v-model="robotVisible" title="钉钉机器人管理" width="980px" @close="editingRobot=null"><ElForm inline><ElFormItem label="机器人名称"><ElInput v-model="robotForm.robot_name" /></ElFormItem><ElFormItem label="机器人地址"><ElInput v-model="robotForm.dingtalk_webbook_url" /></ElFormItem><ElFormItem label="加签密钥"><ElInput v-model="robotForm.dingtalk_webbook_password" show-password /></ElFormItem><ElFormItem><ElButton type="primary" @click="saveRobot">新增机器人</ElButton></ElFormItem></ElForm><ElTable :data="reportRobots" border stripe><ElTableColumn prop="robot_name" label="机器人名称" width="160" /><ElTableColumn label="机器人地址" min-width="300"><template #default="{ row }"><ElInput v-if="editingRobot && editingRobot.robot_name===row.robot_name" v-model="editingRobot.dingtalk_webbook_url" /><span v-else>{{ maskRobotValue(row.dingtalk_webbook_url) }}</span></template></ElTableColumn><ElTableColumn label="加签密钥" min-width="180"><template #default="{ row }"><ElInput v-if="editingRobot && editingRobot.robot_name===row.robot_name" v-model="editingRobot.dingtalk_webbook_password" type="password" /><span v-else>{{ maskRobotValue(row.dingtalk_webbook_password, true) }}</span></template></ElTableColumn><ElTableColumn label="启用" width="90"><template #default="{ row }"><ElSwitch v-model="row.set_status" :active-value="1" :inactive-value="0" @change="toggleRobot(row)" /></template></ElTableColumn><ElTableColumn label="操作" width="140"><template #default="{ row }"><ElButton type="primary" text @click.stop="editingRobot && editingRobot.robot_name===row.robot_name ? saveEditingRobot() : editRobot(row)">{{ editingRobot && editingRobot.robot_name===row.robot_name ? '保存' : '编辑' }}</ElButton><ElButton type="danger" text @click.stop="deleteRobot(row)">删除</ElButton></template></ElTableColumn></ElTable></ElDialog>
@@ -1204,9 +1236,10 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             <div class="daily-management-detail" v-loading="dailyManagementBusy">
               <aside class="daily-week-list"><button v-for="week in dailyWeeks" :key="week.index" :class="{ active: selectedDailyWeek === week.index }" @click="selectDailyWeek(week.index)">第 {{ week.index + 1 }} 周<small>{{ week.start }} 至 {{ week.end }}</small></button></aside>
               <div v-if="showWeekRecords" class="daily-score-table-wrap" v-loading="weekRecordsBusy">
+  <ElInput v-model="weekRecordsSearch" placeholder="搜索记录ID、日期、扣分项目、分数或学生姓名" clearable style="width:320px;margin-bottom:12px" />
   <h3 style="margin-top:0">常规扣分项目</h3>
-  <ElTable :data="weekRecords.single" border stripe style="width:100%;margin-bottom:18px">
-    <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="weekRecords.single.length > 0 && weekBatchSingleIDs.length === weekRecords.single.length" :indeterminate="weekBatchSingleIDs.length > 0 && weekBatchSingleIDs.length < weekRecords.single.length" @change="value => toggleAllWeekSingle(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchSingleIDs.includes(row.id)" @change="value => toggleWeekSingle(row.id, Boolean(value))" /></template></ElTableColumn>
+  <ElTable :data="filteredWeekSingle" border stripe style="width:100%;margin-bottom:18px">
+    <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="filteredWeekSingle.length > 0 && weekBatchSingleIDs.length === filteredWeekSingle.length" :indeterminate="weekBatchSingleIDs.length > 0 && weekBatchSingleIDs.length < filteredWeekSingle.length" @change="value => toggleAllWeekSingle(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchSingleIDs.includes(row.id)" @change="value => toggleWeekSingle(row.id, Boolean(value))" /></template></ElTableColumn>
     <ElTableColumn prop="id" label="记录ID" width="140" />
     <ElTableColumn prop="date" label="日期" width="110" />
     <ElTableColumn prop="content" label="扣分项目" min-width="200" />
@@ -1215,8 +1248,8 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
     <ElTableColumn label="操作" width="120"><template #default="{ row }"><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
       </ElTable>
   <h3>寝室整体差扣分项目</h3>
-  <ElTable :data="weekRecords.multi" border stripe style="width:100%">
-    <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="weekRecords.multi.length > 0 && weekBatchMultiIDs.length === weekRecords.multi.length" :indeterminate="weekBatchMultiIDs.length > 0 && weekBatchMultiIDs.length < weekRecords.multi.length" @change="value => toggleAllWeekMulti(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchMultiIDs.includes(row.id)" @change="value => toggleWeekMulti(row.id, Boolean(value))" /></template></ElTableColumn>
+  <ElTable :data="filteredWeekMulti" border stripe style="width:100%">
+    <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="filteredWeekMulti.length > 0 && weekBatchMultiIDs.length === filteredWeekMulti.length" :indeterminate="weekBatchMultiIDs.length > 0 && weekBatchMultiIDs.length < filteredWeekMulti.length" @change="value => toggleAllWeekMulti(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchMultiIDs.includes(row.id)" @change="value => toggleWeekMulti(row.id, Boolean(value))" /></template></ElTableColumn>
     <ElTableColumn type="expand">
       <template #default="{ row }">
         <ElTable :data="row.subs" border size="small" style="width:100%">
