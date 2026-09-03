@@ -199,9 +199,20 @@ CREATE TABLE police_style_records_multi_subrecords (
     score REAL DEFAULT 0.0
 );
 
-CREATE TABLE subrecords_for_police_style_records_multi_subrecords (id CHAR(32) PRIMARY KEY, belongs_to CHAR(32), content TEXT, FOREIGN KEY (belongs_to) REFERENCES police_style_records_multi_subrecords(id));
+CREATE TABLE subrecords_for_police_style_records_multi_subrecords (
+    id CHAR(32) PRIMARY KEY, 
+    belongs_to CHAR(32), 
+    content TEXT, 
+    FOREIGN KEY (belongs_to) REFERENCES police_style_records_multi_subrecords(id)
+);
 
-CREATE TABLE ownership_multi_subrecords (subrecord_id CHAR(32), student_id CHAR(6), PRIMARY KEY (subrecord_id, student_id), FOREIGN KEY (student_id) REFERENCES students(id), FOREIGN KEY (subrecord_id) REFERENCES subrecords_for_police_style_records_multi_subrecords(id));
+CREATE TABLE ownership_multi_subrecords (
+    subrecord_id CHAR(32), 
+    student_id CHAR(6), 
+    PRIMARY KEY (subrecord_id, student_id), 
+    FOREIGN KEY (student_id) REFERENCES students(id), 
+    FOREIGN KEY (subrecord_id) REFERENCES subrecords_for_police_style_records_multi_subrecords(id)
+);
 
 CREATE TABLE daily_report_config(
     aes_key BLOB PRIMARY KEY, 
@@ -248,7 +259,7 @@ CREATE TABLE daily_report_log(
 
 E\-R图
 
-![E-R图](E-R.png)
+![E-R图](https://yhypzc.github.io/posts/%E7%BA%AA%E6%A3%80%E5%B7%A5%E4%BD%9C%E5%8F%B0(PoliceStyleWorkspace)%E6%8A%80%E6%9C%AF%E6%96%87%E6%A1%A3/%E5%9B%BE%E7%89%87%E5%92%8C%E9%99%84%E4%BB%B6/ER.png)
 
 
 
