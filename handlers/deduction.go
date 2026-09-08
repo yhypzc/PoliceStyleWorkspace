@@ -177,6 +177,15 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting, allowUnspe
 			return ""
 		}
 		date := get(dateCol)
+		if date == "" {
+			// 兼容处理：某行时间字段为空时，自动取当前时间作为该行时间再导入
+			now := time.Now()
+			if isSchoolSupervision {
+				date = fmt.Sprintf("%d.%d", int(now.Month()), now.Day())
+			} else {
+				date = now.Format("2006-01-02 15:04:05")
+			}
+		}
 		name := get(nameCol)
 		studentID := get(studentIDCol)
 		content := get(contentCol)
