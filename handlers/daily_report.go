@@ -291,7 +291,7 @@ func (a *App) autoImportDailyReportRecords(config *models.DailyReportConfig, res
 		log.Printf("[每日播报] 自动入库失败（生成内存表格）: %v", err)
 		return
 	}
-	imported, errs := a.importDeductionWorkbook(file, true, true)
+	imported, errs := a.importDeductionWorkbook(file, true)
 	_ = file.Close()
 	log.Printf("[每日播报] 自动入库完成: 待导入 %d 条(已剔除 state=4/7 的已申诉记录), 实际导入 %d 条", len(records), len(imported))
 	for _, e := range errs {

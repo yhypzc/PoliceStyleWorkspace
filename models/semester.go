@@ -14,7 +14,7 @@ type Semester struct {
 	EndTime   string `json:"end_time"`
 }
 
-// Validate returns an error if the semester dates are not Saturday→next Friday.
+// Validate returns an error if the semester dates are not Friday→next Thursday.
 func (s *Semester) Validate() error {
 	if strings.TrimSpace(s.Name) == "" {
 		return errors.New("学期名称不能为空")
@@ -27,11 +27,11 @@ func (s *Semester) Validate() error {
 	if err != nil {
 		return fmt.Errorf("结束日期格式错误: %w", err)
 	}
-	if start.Weekday() != time.Saturday {
-		return errors.New("起始日期必须是周六")
+	if start.Weekday() != time.Friday {
+		return errors.New("起始日期必须是周五")
 	}
-	if end.Weekday() != time.Friday {
-		return errors.New("结束日期必须是周五")
+	if end.Weekday() != time.Thursday {
+		return errors.New("结束日期必须是周四")
 	}
 	if !end.After(start) {
 		return errors.New("结束日期必须在起始日期之后")

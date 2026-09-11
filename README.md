@@ -58,7 +58,7 @@
 
 按周对每名学生累计"计入惩戒分值"（LogicScore），当周累计达到阈值（默认 `0.3`）即进入惩戒名单，实现位于 `handlers/punishment.go`（`computePunishmentEntries`）。每条记录区分 `RawScore`（计入综测分值 = 应分摊原始分）与 `LogicScore`（计入惩戒分值 = 实际参与惩戒累计的分）。
 
-时间窗口：给定学期与周序号 `weekIndex`，取 `[学期起始 + weekIndex×7 天, 学期起始 + (weekIndex+1)×7 天)`，末端截断到学期结束。
+时间窗口：给定学期与周序号 `weekIndex`，取 `[学期起始 + weekIndex×7 天, 学期起始 + (weekIndex+1)×7 天)`，末端截断到学期结束。周定义为某一周的周五到下一周的周四，因此学期起始日期为周五、结束日期为周四。
 
 分摊与计入：
 
@@ -91,7 +91,7 @@
 
 - `formatDailyReportMessage` 会过滤已申诉记录、去重记录 ID、补充学期周次和本周包干区寝室。
 
-- 当播报日期位于学期内，且为周六、周日或周一，并且轮值寝室配置了手机号时，正文末尾追加包干区任务提醒，同时返回 `atMobiles`。
+- 当播报日期位于学期内，且为周五、周六或周日，并且轮值寝室配置了手机号时，正文末尾追加包干区任务提醒，同时返回 `atMobiles`。
 
 - `postDingTalk` 使用钉钉文本消息格式发送；有手机号时 payload 包含 `at: { atMobiles, isAtAll:false }`，不是只在文本里拼接 `@`。
 
@@ -103,13 +103,15 @@
 
 ### **警务化管理周报**
 
-每周五，每日播报在完成当日广播后，会额外向所有启用的钉钉机器人发送一份本周扣分周报，生成逻辑在 `handlers/daily_report_scheduler.go:formatWeeklySummaryMarkdown`。
+每周五，每日播报在完成当日广播后，会额外向所有启用的钉钉机器人发送一份上一周（周五至周四）扣分周报，生成逻辑在 `handlers/daily_report_scheduler.go:formatWeeklySummaryMarkdown`。
 
-- 触发与周窗口：仅当运行日为周五才生成（非周五直接返回，不发周报）；由学期+周映射 `dailyReportSemesterInfo` 算出本周 `[周起始, 周结束)`，用 `fillDailyScores` 逐日计算每位学生每天的分摊分。
+- 触发与周窗口：仅当运行日为周五才生成（非周五直接返回，不发周报）；周定义为某一周的周五至下一周的周四，周五发送时由 `dailyReportPreviousWeekInfo` 取刚结束的上一周 `[周起始, 周结束)`，用 `fillDailyScores` 逐日计算每位学生每天的分摊分。
 
 - 本周惩戒名单：复用"惩戒名单统计"（`computePunishmentEntries(weekStart, weekEnd, 0.3)`）得出名单，姓名先于正文列出；正文汇总表中名单成员整行以紫色粗体高亮。
 
 - 汇总表：`姓名 | 学号 | 本周各日分值 | 合计`，仅保留本周总分非 0 的学生，按每人合计降序；表末 `合计` 行给出每日合计与周合计。
+
+- 分值格式化（`formatDeductionScore`）：每个单元格中的非 0 分值，若为有限小数则保留全部位数（如 `0.0125`、`0.075`），若为无限循环小数则保留 3 位小数（如 `0.333`、`0.017`）。
 
 - 惩戒明细：对名单成员逐条展开其记录，标注"计入惩戒分值"与"是否惩戒"，并列出每条记录的"计入综测分值/计入惩戒分值"。
 

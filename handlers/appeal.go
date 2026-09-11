@@ -800,7 +800,12 @@ func (a *App) buildAppealZipItem(recordID string, store *appealStore, createMiss
 		photoImages = loadedAppealImages
 		appealImages = nil
 	}
-	docData, err := fillAppealDoc(template, grade, class, displayNames, dateMD, dateMD, recordContent, r2.TextContent, isSchool, photoImages, appealImages)
+	// 申请日期取扣分记录本身的日期（只取日期部分）
+	recordDateOnly := recordDate
+	if len(recordDateOnly) > 10 {
+		recordDateOnly = recordDateOnly[:10]
+	}
+	docData, err := fillAppealDoc(template, grade, class, displayNames, dateMD, recordDateOnly, recordContent, r2.TextContent, isSchool, photoImages, appealImages)
 	if err != nil {
 		return nil, created, fmt.Errorf("生成申诉模板失败: %w", err)
 	}
@@ -1055,12 +1060,13 @@ type wordAppealConfig struct {
 	AppealPhotoPaths []string          `json:"appeal_photo_paths"`
 }
 
-func fillAppealDoc(template []byte, grade, class, names, date, dateMD, content, textContent string, isSchool bool, photoImages, appealImages []appealImage) ([]byte, error) {
+func fillAppealDoc(template []byte, grade, class, names, date, recordDate, content, textContent string, isSchool bool, photoImages, appealImages []appealImage) ([]byte, error) {
 	values := map[string]string{
 		"<grade>":            grade,
 		"<date>":             date,
 		"<class>":            class,
 		"<student_ids_name>": names,
+		"<record_date>":      recordDate,
 		"<record_content>":   content,
 		"<text_content>":     textContent,
 	}
@@ -1144,6 +1150,9 @@ try {
   $doc = $word.Documents.Open($cfg.doc_path, $false, $false)
 
   function Replace-DocText($doc, [string]$findText, [string]$replaceText) {
+    # Text-only replacement: assigning Range.Text keeps the character font
+    # (incl. FZXiaoBiaoSong) and paragraph format of the original placeholder,
+    # and unlike Word Find/Replace it has no 255-character limit.
     $range = $doc.Content
     while ($true) {
       $find = $range.Find
@@ -1174,6 +1183,18 @@ try {
     if (-not $find.Execute()) {
       return
     }
+    # Max display width: the width of the table cell that the marker sits in
+    # (the filled-in part of the template), falling back to the page text width.
+    $maxWidth = 0
+    if ($range.Information(12) -and $range.Cells.Count -gt 0) {
+      $maxWidth = $range.Cells.Item(1).Width
+    }
+    if ($maxWidth -le 0) {
+      try { $maxWidth = $doc.PageSetup.TextColumns.Item(1).Width } catch { $maxWidth = 460 }
+    }
+    if ($maxWidth -le 0) {
+      $maxWidth = 460
+    }
     $insert = $range.Duplicate
     $insert.Text = ''
     foreach ($path in @($paths)) {
@@ -1184,9 +1205,16 @@ try {
         continue
       }
       $shape = $doc.InlineShapes.AddPicture($path, $false, $true, $insert)
-      if ($shape.Width -gt 460) {
-        $ratio = 460 / $shape.Width
-        $shape.Width = 460
+      # Scale proportionally: if the picture is wider than the cell, fit it to
+      # below 90% of that width (Word snaps Width to 0.5pt, so subtract 0.5pt
+      # to stay strictly under 90%); height is scaled by the same ratio.
+      if ($shape.Width -gt $maxWidth) {
+        $target = $maxWidth * 0.9 - 0.5
+        if ($target -le 0) {
+          $target = $maxWidth * 0.9
+        }
+        $ratio = $target / $shape.Width
+        $shape.Width = $target
         $shape.Height = $shape.Height * $ratio
       }
       $insert.SetRange($shape.Range.End, $shape.Range.End)

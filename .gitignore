@@ -6,3 +6,5 @@ third_party/
 tmp_*
 web/node_modules/
 handlers/appeal_path_test.go
+installer
+installer/*

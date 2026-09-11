@@ -405,7 +405,7 @@ function cancelEdit() { editing.value = false; loadSemesters() }
 function onStartChange(val: string) {
   if (!val) return
   const d = new Date(val)
-  if (d.getDay() !== 6) { ElMessage.warning('起始日期必须是周六'); newSemester.start_time = ''; return }
+  if (d.getDay() !== 5) { ElMessage.warning('起始日期必须是周五'); newSemester.start_time = ''; return }
   const end = new Date(d)
   end.setDate(end.getDate() + 6)
   // end date now manually selected
@@ -414,7 +414,7 @@ function onEditStartChange(val: string) {
   const s = currentSemester.value
   if (!s || !val) return
   const d = new Date(val)
-  if (d.getDay() !== 6) { ElMessage.warning('起始日期必须是周六'); s.start_time = ''; return }
+  if (d.getDay() !== 5) { ElMessage.warning('起始日期必须是周五'); s.start_time = ''; return }
   const end = new Date(d); end.setDate(end.getDate() + 6)
   // end date now manually selected
 }
@@ -1335,22 +1335,22 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
 
               <template v-if="editing && activeSemester === s.semester_name">
                 <ElForm label-position="top" @submit.prevent="saveSemester">
-                  <ElFormItem label="起始日期（周六）">
+                  <ElFormItem label="起始日期（周五）">
                     <ElDatePicker
                       :model-value="currentSemester?.start_time"
                       @update:model-value="onEditStartChange"
                       value-format="YYYY-MM-DD"
-                      placeholder="选择周六"
-                      :disabled-date="(d: Date) => d.getDay() !== 6"
+                      placeholder="选择周五"
+                      :disabled-date="(d: Date) => d.getDay() !== 5"
                     />
                   </ElFormItem>
-                  <ElFormItem label="结束日期（仅可选周五）">
+                  <ElFormItem label="结束日期（仅可选周四）">
                     <ElDatePicker
                       :model-value="currentSemester?.end_time"
                       @update:model-value="(val: string) => { if (currentSemester) currentSemester.end_time = val }"
                       value-format="YYYY-MM-DD"
-                      placeholder="选择周五"
-                      :disabled-date="(d: Date) => d.getDay() !== 5"
+                      placeholder="选择周四"
+                      :disabled-date="(d: Date) => d.getDay() !== 4"
                     />
                   </ElFormItem>
                   <div class="semester-actions">
@@ -1361,8 +1361,8 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               </template>
               <template v-else>
                 <div class="semester-info">
-                  <p><span class="label">起始日期（周六）：</span>{{ currentSemester?.start_time }}</p>
-                  <p><span class="label">结束日期（周五）：</span>{{ currentSemester?.end_time }}</p>
+                  <p><span class="label">起始日期（周五）：</span>{{ currentSemester?.start_time }}</p>
+                  <p><span class="label">结束日期（周四）：</span>{{ currentSemester?.end_time }}</p>
                 </div>
                 <div class="semester-actions">
                   <ElButton type="primary" @click="startEdit">编辑学期</ElButton>
@@ -1378,20 +1378,20 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElFormItem label="学期名称">
                 <ElInput v-model="newSemester.semester_name" placeholder="如：2025秋" />
               </ElFormItem>
-              <ElFormItem label="起始日期（仅可选周六）">
+              <ElFormItem label="起始日期（仅可选周五）">
                 <ElDatePicker
                   v-model="newSemester.start_time"
                   value-format="YYYY-MM-DD"
-                  placeholder="选择周六"
-                  :disabled-date="(d: Date) => d.getDay() !== 6"
+                  placeholder="选择周五"
+                  :disabled-date="(d: Date) => d.getDay() !== 5"
                 />
               </ElFormItem>
-              <ElFormItem label="结束日期（仅可选周五）">
+              <ElFormItem label="结束日期（仅可选周四）">
                 <ElDatePicker
                   v-model="newSemester.end_time"
                   value-format="YYYY-MM-DD"
-                  placeholder="选择周五"
-                  :disabled-date="(d: Date) => d.getDay() !== 5"
+                  placeholder="选择周四"
+                  :disabled-date="(d: Date) => d.getDay() !== 4"
                 />
               </ElFormItem>
               <ElButton type="primary" :loading="busy" native-type="submit">创建学期</ElButton>

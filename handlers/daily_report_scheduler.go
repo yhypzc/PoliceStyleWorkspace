@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/big"
 	"net/http"
 	"net/http/cookiejar"
@@ -883,7 +884,7 @@ func (a *App) formatDailyReportMessage(today string, deductions, waiting []map[s
 	atMobiles := []string{}
 	if dailyReportShouldRemindDutyDorm(reportDate, info) {
 		phone := strings.TrimSpace(info.DutyDormPhone)
-		builder.WriteString("\n本周的包干区请寝室长@")
+		builder.WriteString("\n本周的包干区请寝室长/负责人@")
 		builder.WriteString(phone)
 		builder.WriteString("做好任务分工")
 		atMobiles = append(atMobiles, phone)
@@ -898,19 +899,90 @@ func markdownEscapeTableCell(s string) string {
 	return s
 }
 
+// rationalApprox 用连分数求 score 的最简分数近似 n/d（d ≤ maxDen），
+// 近似误差不超过 eps；找不到合适分数时返回 ok=false。
+func rationalApprox(score float64, maxDen int64, eps float64) (int64, int64, bool) {
+	if score == 0 {
+		return 0, 1, true
+	}
+	negative := score < 0
+	x := math.Abs(score)
+	p0, q0 := int64(0), int64(1)
+	p1, q1 := int64(1), int64(0)
+	b := x
+	for i := 0; i < 64; i++ {
+		a := int64(math.Floor(b))
+		p2 := a*p1 + p0
+		q2 := a*q1 + q0
+		if q2 > maxDen || q2 <= 0 {
+			break
+		}
+		p0, q0, p1, q1 = p1, q1, p2, q2
+		if q1 > 0 && math.Abs(x-float64(p1)/float64(q1)) <= eps {
+			if negative {
+				return -p1, q1, true
+			}
+			return p1, q1, true
+		}
+		frac := b - float64(a)
+		if frac <= 0 {
+			break
+		}
+		b = 1 / frac
+		if math.IsInf(b, 0) || math.IsNaN(b) {
+			break
+		}
+	}
+	return 0, 0, false
+}
+
+// finiteDecimalDigits 返回分母 d 对应小数的精确位数（d 的质因数只含 2 和 5）；
+// 若 d 还含有其他质因数（对应无限循环小数）则返回 -1。
+func finiteDecimalDigits(d int64) int {
+	if d < 0 {
+		d = -d
+	}
+	twos, fives := 0, 0
+	for d%2 == 0 {
+		d /= 2
+		twos++
+	}
+	for d%5 == 0 {
+		d /= 5
+		fives++
+	}
+	if d != 1 {
+		return -1
+	}
+	if twos > fives {
+		return twos
+	}
+	return fives
+}
+
+func trimDecimal(s string) string {
+	if !strings.Contains(s, ".") {
+		return s
+	}
+	s = strings.TrimRight(s, "0")
+	return strings.TrimRight(s, ".")
+}
+
+// formatDeductionScore 输出周报表格中的分值文本：
+// 非 0 且为有限小数时保留全部位数（去掉末尾多余的 0）；
+// 为无限循环小数时保留 3 位小数（四舍五入）；0 输出空字符串。
 func formatDeductionScore(score float64) string {
 	if score == 0 {
 		return ""
 	}
-	s := strconv.FormatFloat(score, 'f', -1, 64)
-	if dot := strings.IndexByte(s, '.'); dot >= 0 {
-		if len(s)-dot-1 > 2 {
-			s = strconv.FormatFloat(score, 'f', 2, 64)
-			s = strings.TrimRight(s, "0")
-			s = strings.TrimRight(s, ".")
+	if num, den, ok := rationalApprox(score, 1_000_000_000, 1e-12); ok {
+		r := new(big.Rat).SetFrac64(num, den)
+		if digits := finiteDecimalDigits(r.Denom().Int64()); digits >= 0 {
+			return trimDecimal(r.FloatString(digits))
 		}
+		return trimDecimal(r.FloatString(3))
 	}
-	return s
+	return trimDecimal(strconv.FormatFloat(score, 'f', 3, 64))
 }
 
 func (a *App) formatWeeklySummaryMarkdown(today string) (string, error) {
@@ -921,12 +993,13 @@ func (a *App) formatWeeklySummaryMarkdown(today string) (string, error) {
 	if reportDate.Weekday() != time.Friday {
 		return "", fmt.Errorf("非周五，不发送周汇总")
 	}
-	info, err := a.dailyReportSemesterInfo(reportDate)
+	// 周定义为周五→下周四，周五发送时汇总刚结束的上一周
+	info, err := a.dailyReportPreviousWeekInfo(reportDate)
 	if err != nil {
 		return "", err
 	}
 	if info == nil {
-		return "", fmt.Errorf("当前日期不在任何学期范围内")
+		return "", fmt.Errorf("没有可汇总的上一周（当前为学期第一周或不在学期范围内）")
 	}
 	weekStart, err := time.ParseInLocation("2006-01-02", info.WeekStart, time.Local)
 	if err != nil {
@@ -1197,7 +1270,7 @@ func dailyReportShouldRemindDutyDorm(day time.Time, info *dailyReportSemesterInf
 		return false
 	}
 	weekday := day.Weekday()
-	return weekday == time.Saturday || weekday == time.Sunday || weekday == time.Monday
+	return weekday == time.Friday || weekday == time.Saturday || weekday == time.Sunday || weekday == time.Monday
 }
 
 func (a *App) dailyReportSemesterInfo(day time.Time) (*dailyReportSemesterInfo, error) {
@@ -1211,34 +1284,65 @@ func (a *App) dailyReportSemesterInfo(day time.Time) (*dailyReportSemesterInfo, 
 			continue
 		}
 		weekIndex := int(day.Sub(start).Hours() / (24 * 7))
-		weekStart := start.AddDate(0, 0, weekIndex*7)
-		weekEnd := weekStart.AddDate(0, 0, 7)
-		if weekEnd.After(end) {
-			weekEnd = end
-		}
-		info := &dailyReportSemesterInfo{
-			SemesterName: semester.Name,
-			WeekIndex:    weekIndex,
-			WeekStart:    weekStart.Format("2006-01-02"),
-			WeekEnd:      weekEnd.AddDate(0, 0, -1).Format("2006-01-02"),
-		}
-		dorms, err := models.ListDorms(a.DB)
-		if err != nil {
-			return nil, err
-		}
-		if len(dorms) > 0 {
-			dutySeq := weekIndex%len(dorms) + 1
-			for _, dorm := range dorms {
-				if dorm.Seq == dutySeq {
-					info.DutyDorm = dorm.Name
-					info.DutyDormPhone = dorm.PhoneNumber
-					break
-				}
-			}
-		}
-		return info, nil
+		return a.buildDailyReportSemesterInfo(semester, weekIndex)
 	}
 	return nil, nil
+}
+
+// dailyReportPreviousWeekInfo 返回 day 所在周的上一周（周定义：周五→下周四）。
+// 周五发送周报时，上一周即前一天（周四）结束的那一周。
+// 学期结束边界（end 为排他边界，即最后一周周四的次日周五）也纳入匹配，
+// 以便学期最后一周在结束后的周五仍能发出周报。
+func (a *App) dailyReportPreviousWeekInfo(day time.Time) (*dailyReportSemesterInfo, error) {
+	semesters, err := models.ListSemesters(a.DB)
+	if err != nil {
+		return nil, err
+	}
+	for _, semester := range semesters {
+		start, end, ok := semesterRange(semester)
+		if !ok || day.Before(start) || day.After(end) {
+			continue
+		}
+		weekIndex := int(day.Sub(start).Hours() / (24 * 7))
+		if weekIndex == 0 {
+			return nil, nil
+		}
+		return a.buildDailyReportSemesterInfo(semester, weekIndex-1)
+	}
+	return nil, nil
+}
+
+func (a *App) buildDailyReportSemesterInfo(semester models.Semester, weekIndex int) (*dailyReportSemesterInfo, error) {
+	start, end, ok := semesterRange(semester)
+	if !ok {
+		return nil, nil
+	}
+	weekStart := start.AddDate(0, 0, weekIndex*7)
+	weekEnd := weekStart.AddDate(0, 0, 7)
+	if weekEnd.After(end) {
+		weekEnd = end
+	}
+	info := &dailyReportSemesterInfo{
+		SemesterName: semester.Name,
+		WeekIndex:    weekIndex,
+		WeekStart:    weekStart.Format("2006-01-02"),
+		WeekEnd:      weekEnd.AddDate(0, 0, -1).Format("2006-01-02"),
+	}
+	dorms, err := models.ListDorms(a.DB)
+	if err != nil {
+		return nil, err
+	}
+	if len(dorms) > 0 {
+		dutySeq := weekIndex%len(dorms) + 1
+		for _, dorm := range dorms {
+			if dorm.Seq == dutySeq {
+				info.DutyDorm = dorm.Name
+				info.DutyDormPhone = dorm.PhoneNumber
+				break
+			}
+		}
+	}
+	return info, nil
 }
 
 func unappealedReportRecords(groups ...[]map[string]any) []dailyReportRecord {

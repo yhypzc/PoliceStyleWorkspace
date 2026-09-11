@@ -134,7 +134,7 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	imported, errs := a.importDeductionWorkbook(f, false, false)
+	imported, errs := a.importDeductionWorkbook(f, false)
 	result := map[string]any{"ok": true, "imported": len(imported), "records": imported}
 	if len(errs) > 0 {
 		result["errors"] = errs
@@ -147,11 +147,10 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 // inserts them into the regular-deduction tables. It returns the imported
 // records and any per-row failures. When skipExisting is true, rows whose
 // deterministic record ID already exists are treated as already imported and
-// skipped silently (keeps the daily-report auto-import idempotent). When
-// allowUnspecified is true, rows with an empty 违规学号 are imported as
-// "未指定/未认定" records (no student ownership) instead of being rejected;
-// otherwise an empty 违规学号 is an error.
-func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting, allowUnspecified bool) (imported []models.DeductionRecord, errs []string) {
+// skipped silently (keeps the daily-report auto-import idempotent).
+// 若某行违规学号为空：先用姓名字段在学生表中查学号，查到则用该学号关联；
+// 姓名也查不到（或无姓名）时，作为"未认定"记录（无学生归属）入库，供后续认定。
+func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (imported []models.DeductionRecord, errs []string) {
 	sheetName := f.GetSheetName(0)
 	if sheetName == "" {
 		return nil, append(errs, "Excel 文件中没有工作表")
@@ -218,14 +217,12 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting, allowUnspe
 			Score:             score,
 			SchoolSupervision: isSchoolSupervision,
 		}
-		if studentID == "" {
-			// 无违规学号：默认要求必填；仅当允许未指定导入时，作为
-			// "未指定/未认定"记录（无学生归属）入库，供后续认定。
-			if !allowUnspecified {
-				errs = append(errs, fmt.Sprintf("第 %d 行: 学号为空", i+1))
-				continue
-			}
-			rec, err := models.CreateUnassignedDeductionRecord(a.DB, r)
+		// 违规学号为空：先用姓名在学生表查学号；查到则改用学号关联
+		if studentID == "" && name != "" {
+			studentID = a.studentIDsForNames(name)
+		}
+		if studentID != "" {
+			rec, err := models.CreateDeductionRecordForStudents(a.DB, r, studentID)
 			if err != nil {
 				if skipExisting && isDeductionDuplicateError(err) {
 					continue
@@ -236,8 +233,8 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting, allowUnspe
 			imported = append(imported, *rec)
 			continue
 		}
-
-		rec, err := models.CreateDeductionRecordForStudents(a.DB, r, studentID)
+		// 违规学号为空且姓名也查不到（或无姓名）→ 作为"未认定"记录入库
+		rec, err := models.CreateUnassignedDeductionRecord(a.DB, r)
 		if err != nil {
 			if skipExisting && isDeductionDuplicateError(err) {
 				continue
