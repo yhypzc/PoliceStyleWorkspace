@@ -78,7 +78,7 @@ func (a *App) DailyManagementSummary(w http.ResponseWriter, r *http.Request) {
 			row := dailyStudentRow{ID: student.ID, Name: student.Name, Scores: make(map[string]float64)}
 			byID[student.ID] = &row
 		}
-		if err := a.fillDailyScores(byID, weekStart, weekEnd); err != nil {
+		if err := a.fillDailyScores(byID, weekStart, weekEnd, true); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -133,7 +133,7 @@ func (a *App) DailyManagementWeek(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, row)
 		byID[student.ID] = &rows[len(rows)-1]
 	}
-	if err := a.fillDailyScores(byID, weekStart, weekEnd); err != nil {
+	if err := a.fillDailyScores(byID, weekStart, weekEnd, false); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -350,28 +350,45 @@ func (a *App) fillDailyExportDetails(file *excelize.File, start, end time.Time) 
 	if err != nil {
 		return err
 	}
+	headerStyle, _ := file.GetCellStyle(sheet, "A1")
+	_ = file.SetCellStyle(sheet, "E1", "E1", headerStyle)
+	file.SetCellValue(sheet, "E1", "是否计入区队周扣分")
+	_ = file.SetColWidth(sheet, "E", "E", 18.45)
 	for i, detail := range rows {
 		excelRow := i + 2
 		_ = file.SetCellStyle(sheet, fmt.Sprintf("A%d", excelRow), fmt.Sprintf("C%d", excelRow), detailTextStyle)
 		_ = file.SetCellStyle(sheet, fmt.Sprintf("D%d", excelRow), fmt.Sprintf("D%d", excelRow), detailDecimalStyle)
+		_ = file.SetCellStyle(sheet, fmt.Sprintf("E%d", excelRow), fmt.Sprintf("E%d", excelRow), detailTextStyle)
 		file.SetCellValue(sheet, fmt.Sprintf("A%d", excelRow), detail.Date)
 		file.SetCellValue(sheet, fmt.Sprintf("B%d", excelRow), detail.Name)
 		file.SetCellValue(sheet, fmt.Sprintf("C%d", excelRow), detail.Content)
 		file.SetCellValue(sheet, fmt.Sprintf("D%d", excelRow), detail.Score)
+		file.SetCellValue(sheet, fmt.Sprintf("E%d", excelRow), includeWeeklyText(detail.IncludeWeekly))
 	}
 	return nil
 }
 
 type deductionDetailRow struct {
-	Date    string
-	Name    string
-	Content string
-	Score   float64
+	Date          string
+	Name          string
+	Content       string
+	Score         float64
+	IncludeWeekly bool
+}
+
+// includeWeeklyText renders the numeric include_weekly flag as 是/否.
+func includeWeeklyText(include bool) string {
+	if include {
+		return "是"
+	}
+	return "否"
 }
 
 // deductionDetailRows returns one row per student deduction (single and multi)
 // falling inside [start, end), with per-student shares computed the same way
-// as the weekly export's detail sheet.
+// as the weekly export's detail sheet. Unlike the weekly score statistics, the
+// detail listing keeps every record; each row carries its 是否计入区队周扣分
+// flag, which is always 是 for dorm overall-bad records.
 func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, error) {
 	students, err := models.ListStudents(a.DB)
 	if err != nil {
@@ -393,7 +410,7 @@ func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, e
 		}
 		share := record.Score / float64(len(record.RecognizedStudentIDs))
 		for _, studentID := range record.RecognizedStudentIDs {
-			rows = append(rows, deductionDetailRow{Date: date.Format("2006-01-02"), Name: names[studentID], Content: record.Content, Score: share})
+			rows = append(rows, deductionDetailRow{Date: date.Format("2006-01-02"), Name: names[studentID], Content: record.Content, Score: share, IncludeWeekly: record.IncludeWeekly})
 		}
 	}
 	multi, err := models.ListMultiDeductionRecords(a.DB)
@@ -418,7 +435,8 @@ func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, e
 			}
 			share := record.Score / float64(len(subs)) / float64(len(sub.StudentIDs))
 			for _, studentID := range sub.StudentIDs {
-				rows = append(rows, deductionDetailRow{Date: date.Format("2006-01-02"), Name: names[studentID], Content: record.Content + "_" + sub.Content, Score: share})
+				// 寝室整体差的"是否计入区队周扣分"恒为是
+				rows = append(rows, deductionDetailRow{Date: date.Format("2006-01-02"), Name: names[studentID], Content: record.Content + "_" + sub.Content, Score: share, IncludeWeekly: true})
 			}
 		}
 	}
@@ -433,7 +451,7 @@ func (a *App) addDeductionDetailsSheet(file *excelize.File, start, end time.Time
 		return err
 	}
 	sheet := file.GetSheetName(sheetIndex)
-	for i, header := range []string{"时间", "姓名", "项目", "分数"} {
+	for i, header := range []string{"时间", "姓名", "项目", "分数", "是否计入区队周扣分"} {
 		cell, _ := excelize.ColumnNumberToName(i + 1)
 		file.SetCellValue(sheet, fmt.Sprintf("%s1", cell), header)
 	}
@@ -441,6 +459,7 @@ func (a *App) addDeductionDetailsSheet(file *excelize.File, start, end time.Time
 	_ = file.SetColWidth(sheet, "B", "B", 15.63)
 	_ = file.SetColWidth(sheet, "C", "C", 25.36)
 	_ = file.SetColWidth(sheet, "D", "D", 8.73)
+	_ = file.SetColWidth(sheet, "E", "E", 18.45)
 	rows, err := a.deductionDetailRows(start, end)
 	if err != nil {
 		return err
@@ -451,6 +470,7 @@ func (a *App) addDeductionDetailsSheet(file *excelize.File, start, end time.Time
 		file.SetCellValue(sheet, fmt.Sprintf("B%d", excelRow), detail.Name)
 		file.SetCellValue(sheet, fmt.Sprintf("C%d", excelRow), detail.Content)
 		file.SetCellValue(sheet, fmt.Sprintf("D%d", excelRow), detail.Score)
+		file.SetCellValue(sheet, fmt.Sprintf("E%d", excelRow), includeWeeklyText(detail.IncludeWeekly))
 	}
 	return nil
 }
@@ -494,7 +514,7 @@ func (a *App) ExportDailyManagementSummary(w http.ResponseWriter, r *http.Reques
 		for _, student := range students {
 			byID[student.ID] = &dailyStudentRow{ID: student.ID, Name: student.Name, Scores: map[string]float64{}}
 		}
-		if err := a.fillDailyScores(byID, weekStart, weekEnd); err != nil {
+		if err := a.fillDailyScores(byID, weekStart, weekEnd, true); err != nil {
 			writeError(w, 500, err.Error())
 			return
 		}
@@ -546,7 +566,7 @@ func (a *App) dailyWeekRows(start, end time.Time) (dailyWeek, []dailyStudentRow,
 		rows = append(rows, dailyStudentRow{ID: student.ID, Name: student.Name, Scores: map[string]float64{}})
 		byID[student.ID] = &rows[len(rows)-1]
 	}
-	if err := a.fillDailyScores(byID, start, end); err != nil {
+	if err := a.fillDailyScores(byID, start, end, false); err != nil {
 		return dailyWeek{}, nil, err
 	}
 	return week, rows, nil
@@ -569,7 +589,15 @@ func makeDailyWeek(index int, start, end time.Time) dailyWeek {
 	return dailyWeek{Index: index, Start: start.Format("2006-01-02"), End: end.AddDate(0, 0, -1).Format("2006-01-02"), Dates: dates}
 }
 
-func (a *App) fillDailyScores(rows map[string]*dailyStudentRow, start, end time.Time) error {
+// fillDailyScores aggregates per-student daily shares. When includeNonCounted is
+// false (all weekly views), single-deduction records marked "不计入区队周扣分"
+// (include_weekly = 0) are skipped before allocation; dorm overall-bad records
+// always count. The semester summary passes true so it ignores that flag.
+func (a *App) fillDailyScores(rows map[string]*dailyStudentRow, start, end time.Time, includeNonCounted bool) error {
+	singleFilter := " AND r.include_weekly <> 0"
+	if includeNonCounted {
+		singleFilter = ""
+	}
 	query := `SELECT student_id, day, SUM(score) FROM (
 		SELECT o.student_id AS student_id, substr(r.submit_date, 1, 10) AS day,
 			r.score * 1.0 / ownership_counts.student_count AS score
@@ -577,7 +605,7 @@ func (a *App) fillDailyScores(rows map[string]*dailyStudentRow, start, end time.
 		JOIN ownership_single_subrecords o ON o.record_id = r.id
 		JOIN (SELECT record_id, COUNT(*) AS student_count FROM ownership_single_subrecords GROUP BY record_id) ownership_counts
 			ON ownership_counts.record_id = r.id
-		WHERE r.submit_date >= ? AND r.submit_date < ?
+		WHERE r.submit_date >= ? AND r.submit_date < ?` + singleFilter + `
 		UNION ALL
 		SELECT o.student_id AS student_id, substr(r.submit_date, 1, 10) AS day,
 			r.score * 1.0 / sub_counts.sub_count / student_counts.student_count AS score
@@ -884,20 +912,24 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 
 	// 查询常规扣分记录
 	type singleRecord struct {
-		ID          string   `json:"id"`
-		Date        string   `json:"date"`
-		Content     string   `json:"content"`
-		Score       float64  `json:"score"`
-		StudentIDs  []string `json:"student_ids"`
-		StudentNames string  `json:"student_names"`
+		ID            string   `json:"id"`
+		SubmitDate    string   `json:"submit_date"`
+		Date          string   `json:"date"`
+		StudentName   string   `json:"student_name"`
+		Content       string   `json:"content"`
+		Score         float64  `json:"score"`
+		IncludeWeekly bool     `json:"include_weekly"`
+		StudentIDs    []string `json:"student_ids"`
+		StudentNames  string   `json:"student_names"`
 	}
 	singleRows, err := a.DB.Query(`
-		SELECT r.id, r.submit_date, r.content, r.score, GROUP_CONCAT(o.student_id, ','), GROUP_CONCAT(s.stu_name, ',')
+		SELECT r.id, r.submit_date, r.student_name, r.content, r.score, r.include_weekly,
+			GROUP_CONCAT(o.student_id, ','), GROUP_CONCAT(s.stu_name, ',')
 		FROM police_style_records_single_subrecords r
 		JOIN ownership_single_subrecords o ON o.record_id = r.id
 		JOIN students s ON s.id = o.student_id
 		WHERE r.submit_date >= ? AND r.submit_date < ?
-		GROUP BY r.id
+		GROUP BY r.id, r.submit_date, r.student_name, r.content, r.score, r.include_weekly
 		ORDER BY r.submit_date, r.id`,
 		weekStart.Format("2006-01-02 15:04:05"), weekEnd.Format("2006-01-02 15:04:05"))
 	if err != nil {
@@ -907,9 +939,10 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 	defer singleRows.Close()
 	var singleRecords []singleRecord
 	for singleRows.Next() {
-		var id, date, content, idsStr, namesStr string
+		var id, date, studentName, content, idsStr, namesStr string
 		var score float64
-		if err := singleRows.Scan(&id, &date, &content, &score, &idsStr, &namesStr); err != nil {
+		var includeWeekly int
+		if err := singleRows.Scan(&id, &date, &studentName, &content, &score, &includeWeekly, &idsStr, &namesStr); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取常规扣分记录失败: "+err.Error())
 			return
 		}
@@ -919,7 +952,8 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 			studentIDs = nil
 		}
 		singleRecords = append(singleRecords, singleRecord{
-			ID: id, Date: date[:10], Content: content, Score: score,
+			ID: id, SubmitDate: date, Date: date[:10], StudentName: studentName,
+			Content: content, Score: score, IncludeWeekly: includeWeekly != 0,
 			StudentIDs: studentIDs, StudentNames: studentNames,
 		})
 	}
@@ -932,14 +966,16 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 		StudentNames string   `json:"student_names"`
 	}
 	type multiRecord struct {
-		ID      string           `json:"id"`
-		Date    string           `json:"date"`
-		Content string           `json:"content"`
-		Score   float64          `json:"score"`
-		Subs    []multiSubRecord `json:"subs"`
+		ID         string           `json:"id"`
+		SubmitDate string           `json:"submit_date"`
+		Date       string           `json:"date"`
+		DormName   string           `json:"dorm_name"`
+		Content    string           `json:"content"`
+		Score      float64          `json:"score"`
+		Subs       []multiSubRecord `json:"subs"`
 	}
 	multiRows, err := a.DB.Query(`
-		SELECT r.id, r.submit_date, r.content, r.score
+		SELECT r.id, r.submit_date, r.dorm_name, r.content, r.score
 		FROM police_style_records_multi_subrecords r
 		WHERE r.submit_date >= ? AND r.submit_date < ?
 		ORDER BY r.submit_date, r.id`,
@@ -952,13 +988,13 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 	multiMap := make(map[string]*multiRecord)
 	var multiOrder []string
 	for multiRows.Next() {
-		var id, date, content string
+		var id, date, dormName, content string
 		var score float64
-		if err := multiRows.Scan(&id, &date, &content, &score); err != nil {
+		if err := multiRows.Scan(&id, &date, &dormName, &content, &score); err != nil {
 			writeError(w, http.StatusInternalServerError, "读取寝室整体差记录失败: "+err.Error())
 			return
 		}
-		multiMap[id] = &multiRecord{ID: id, Date: date[:10], Content: content, Score: score}
+		multiMap[id] = &multiRecord{ID: id, SubmitDate: date, Date: date[:10], DormName: dormName, Content: content, Score: score}
 		multiOrder = append(multiOrder, id)
 	}
 

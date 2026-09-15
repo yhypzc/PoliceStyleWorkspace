@@ -34,18 +34,19 @@ func (a *App) ListStudents(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) CreateStudent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID   string `json:"id"`
-		Name string `json:"stu_name"`
+		ID          string `json:"id"`
+		Name        string `json:"stu_name"`
+		PhoneNumber string `json:"phone_number"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	s, err := models.CreateStudent(a.DB, req.ID, req.Name)
+	s, err := models.CreateStudent(a.DB, req.ID, req.Name, req.PhoneNumber)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	log.Printf("[学生] 新增 %q (学号: %s)", s.Name, s.ID)
+	log.Printf("[学生] 新增 %q (学号: %s, 手机号: %s)", s.Name, s.ID, s.PhoneNumber)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "student": s})
 }
 
@@ -56,16 +57,17 @@ func (a *App) UpdateStudent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name string `json:"stu_name"`
+		Name        string `json:"stu_name"`
+		PhoneNumber string `json:"phone_number"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := models.UpdateStudent(a.DB, id, req.Name); err != nil {
+	if err := models.UpdateStudent(a.DB, id, req.Name, req.PhoneNumber); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	log.Printf("[学生] 更新 ID=%q -> %q", id, req.Name)
+	log.Printf("[学生] 更新 ID=%q -> %q (手机号: %s)", id, req.Name, req.PhoneNumber)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -187,13 +189,16 @@ func (a *App) ImportStudents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	headerRow := rows[0]
-	nameCol, idCol := -1, -1
+	nameCol, idCol, phoneCol := -1, -1, -1
 	for i, h := range headerRow {
 		h = strings.TrimSpace(h)
-		if h == "姓名" {
+		switch h {
+		case "姓名":
 			nameCol = i
-		} else if h == "学号" {
+		case "学号":
 			idCol = i
+		case "手机号", "手机号码", "电话号码", "电话", "联系方式":
+			phoneCol = i
 		}
 	}
 	if nameCol < 0 || idCol < 0 {
@@ -209,11 +214,15 @@ func (a *App) ImportStudents(w http.ResponseWriter, r *http.Request) {
 		row := rows[i]
 		name := ""
 		studentID := ""
+		phoneNumber := ""
 		if nameCol < len(row) {
 			name = strings.TrimSpace(row[nameCol])
 		}
 		if idCol < len(row) {
 			studentID = strings.TrimSpace(row[idCol])
+		}
+		if phoneCol >= 0 && phoneCol < len(row) {
+			phoneNumber = strings.TrimSpace(row[phoneCol])
 		}
 		if name == "" && studentID == "" {
 			continue
@@ -230,7 +239,7 @@ func (a *App) ImportStudents(w http.ResponseWriter, r *http.Request) {
 			errors = append(errors, fmt.Sprintf("第 %d 行: 学号 %q 格式不正确（仅限数字）", i+1, studentID))
 			continue
 		}
-		s, err := models.CreateStudent(a.DB, studentID, name)
+		s, err := models.CreateStudent(a.DB, studentID, name, phoneNumber)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("第 %d 行: %s", i+1, err.Error()))
 			continue

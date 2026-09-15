@@ -322,6 +322,11 @@ func DeleteDingTalkRobot(db *sql.DB, name string) error {
 	if _, err := tx.Exec(`DELETE FROM daily_report_log WHERE robot_name=?`, name); err != nil {
 		return err
 	}
+	// Scheduled broadcast events reference the robot by name, so their mapping
+	// rows have to go first (the event itself is kept, its robot list shrinks).
+	if _, err := tx.Exec(`DELETE FROM report_event_to_robots WHERE report_robot_id=?`, name); err != nil {
+		return err
+	}
 	result, err := tx.Exec(`DELETE FROM dingtalk_webbook_robots WHERE robot_name=?`, name)
 	if err != nil {
 		return err

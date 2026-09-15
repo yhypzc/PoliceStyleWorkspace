@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, clearCSRFToken, csrfHeaders, setCSRFToken } from './api'
 import EmojiText from '../../third_party/art-design-pro/src/utils/ui/emojo'
 
-const page = computed(() => location.pathname.includes('daily-report') ? 'daily-report' : location.pathname.includes('change-password') ? 'password' : location.pathname.includes('daily-management') ? 'daily-management' : location.pathname.includes('dorms') ? 'dorms' : location.pathname.includes('students') ? 'students' : location.pathname.includes('multi-deductions') ? 'multi-deductions' : location.pathname.includes('deductions') ? 'deductions' : location.pathname.includes('semester') ? 'semester' : location.pathname.includes('workspace') ? 'workspace' : 'login')
+const page = computed(() => location.pathname.includes('daily-report') ? 'daily-report' : location.pathname.includes('change-password') ? 'password' : location.pathname.includes('daily-management') ? 'daily-management' : location.pathname.includes('report-events') ? 'report-events' : location.pathname.includes('dorms') ? 'dorms' : location.pathname.includes('students') ? 'students' : location.pathname.includes('multi-deductions') ? 'multi-deductions' : location.pathname.includes('deductions') ? 'deductions' : location.pathname.includes('semester') ? 'semester' : location.pathname.includes('workspace') ? 'workspace' : 'login')
 const busy = ref(false)
 const authReady = ref(false)
 const login = reactive({ username: 'admin', password: '' })
@@ -148,6 +148,122 @@ async function toggleRobot(row:any){
   }
 }
 async function deleteRobot(row:any){ try { await api('/api/daily-report/robots',{method:'DELETE',body:JSON.stringify({robot_name: row.robot_name})}); reportRobots.value=reportRobots.value.filter(r=>r.robot_name!==row.robot_name); ElMessage.success('机器人已删除') } catch (error:any) { ElMessage.error(error.message) } }
+
+// ── Broadcast event state & actions ──
+type ReportEvent = { id: number; scheduled_time: string; status: number; content: string; logs: string; robots: string[] }
+const reportEvents = ref<ReportEvent[]>([])
+const reportEventBusy = ref(false)
+const reportEventDialogVisible = ref(false)
+const editingReportEvent = ref<ReportEvent | null>(null)
+const reportEventForm = reactive({ scheduled_date: '', scheduled_clock: '', content: '', robots: [] as string[] })
+// ElMention inserts the option value; DingTalk needs "@手机号" in the text for a
+// real mention, so the dropdown shows the student name and inserts the mobile.
+const mentionOptions = computed(() => students.value
+  .filter((student) => (student.phone_number || '').trim() !== '')
+  .map((student) => ({ value: student.phone_number, label: `${student.stu_name}（${student.phone_number}）` })))
+const reportEventRobotOptions = computed(() => reportRobots.value.map((robot) => ({
+  value: robot.robot_name,
+  label: `${robot.robot_name}${robot.set_status ? '' : '（已禁用，弹窗播报仍会发送）'}`
+})))
+const sortedReportEvents = computed(() => [...reportEvents.value].sort((a, b) => {
+  if (a.scheduled_time === b.scheduled_time) return a.id - b.id
+  return a.scheduled_time < b.scheduled_time ? -1 : 1
+}))
+function reportEventStatusText(status: number) { return status === 1 ? '播报成功' : status === 2 ? '播报失败' : '还未播报' }
+function reportEventStatusType(status: number) { return status === 1 ? 'success' : status === 2 ? 'danger' : 'info' }
+function reportEventActionText(event: ReportEvent) { return event.status === 2 ? '重试' : '测试' }
+// The cell uses `white-space: pre-wrap`, so real line breaks are shown as-is;
+// only CRLF/whitespace noise from pasted content is normalized here.
+function formatReportEventContent(content: string) { return (content || '').replace(/\r\n/g, '\n').replace(/\s+$/, '') }
+async function loadReportEvents() {
+  reportEventBusy.value = true
+  try {
+    const res = await api<{ events: ReportEvent[] }>('/api/report-events', { cache: 'no-store' })
+    reportEvents.value = res.events || []
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { reportEventBusy.value = false }
+}
+async function loadReportEventPage() {
+  await loadReportEvents()
+  await loadStudents()
+  const res = await api<{ robots: any[] }>('/api/daily-report/robots')
+  reportRobots.value = res.robots || []
+}
+function splitReportEventTime(value: string) {
+  const text = (value || '').trim().replace('T', ' ')
+  const [date, clock = ''] = text.split(' ')
+  return { date, clock: clock.slice(0, 5) }
+}
+function resetReportEventForm() {
+  reportEventForm.scheduled_date = ''
+  reportEventForm.scheduled_clock = ''
+  reportEventForm.content = ''
+  reportEventForm.robots = []
+}
+function openCreateReportEvent() {
+  editingReportEvent.value = null
+  resetReportEventForm()
+  reportEventDialogVisible.value = true
+}
+function openEditReportEvent(event: ReportEvent) {
+  const { date, clock } = splitReportEventTime(event.scheduled_time)
+  editingReportEvent.value = event
+  reportEventForm.scheduled_date = date
+  reportEventForm.scheduled_clock = clock
+  reportEventForm.content = event.content
+  reportEventForm.robots = [...(event.robots || [])]
+  reportEventDialogVisible.value = true
+}
+async function submitReportEvent() {
+  if (!reportEventForm.scheduled_date || !reportEventForm.scheduled_clock) return ElMessage.warning('请选择计划播报的日期和时刻')
+  if (!reportEventForm.content.trim()) return ElMessage.warning('请填写播报内容')
+  if (!reportEventForm.robots.length) return ElMessage.warning('请至少选择一个发送的机器人')
+  const payload = {
+    scheduled_time: `${reportEventForm.scheduled_date} ${reportEventForm.scheduled_clock}:00`,
+    content: reportEventForm.content,
+    robots: reportEventForm.robots
+  }
+  reportEventBusy.value = true
+  try {
+    if (editingReportEvent.value) {
+      await api(`/api/report-events/${editingReportEvent.value.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+      ElMessage.success('定时通知已更新')
+    } else {
+      await api('/api/report-events', { method: 'POST', body: JSON.stringify(payload) })
+      ElMessage.success('定时通知已新增')
+    }
+    reportEventDialogVisible.value = false
+    editingReportEvent.value = null
+    await loadReportEvents()
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { reportEventBusy.value = false }
+}
+async function testReportEvent(event: ReportEvent) {
+  const label = reportEventActionText(event)
+  try {
+    await ElMessageBox.confirm(`确定立即${label}发送通知 #${event.id} 吗？将发送到：${(event.robots || []).join('、') || '（未配置机器人）'}`, `确认${label}`, { type: 'warning', confirmButtonText: label, cancelButtonText: '取消' })
+  } catch { return }
+  reportEventBusy.value = true
+  try {
+    const res = await api<{ status: number; message: string }>(`/api/report-events/${event.id}/test`, { method: 'POST' })
+    if (res.status === 1) ElMessage.success(`#${event.id} 发送成功`)
+    else ElMessage.error(`#${event.id} 发送失败：${res.message}`)
+    await loadReportEvents()
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { reportEventBusy.value = false }
+}
+async function deleteReportEvent(event: ReportEvent) {
+  try {
+    await ElMessageBox.confirm(`确定删除定时通知 #${event.id} 吗？`, '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+  } catch { return }
+  reportEventBusy.value = true
+  try {
+    await api(`/api/report-events/${event.id}`, { method: 'DELETE' })
+    ElMessage.success('定时通知已删除')
+    await loadReportEvents()
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { reportEventBusy.value = false }
+}
 const dailySummaryVisible = ref(false)
 const showWeekRecords = ref(false)
 const dailySummaryRows = ref<DailySummaryRow[]>([])
@@ -161,6 +277,10 @@ type WorkspaceRecords = { single: Deduction[]; multi: MultiDeduction[] }
 const workspaceRecordsVisible = ref(false)
 const workspaceRecordsTitle = ref('')
 const workspaceRecords = ref<WorkspaceRecords>({ single: [], multi: [] })
+const squadName = ref('')
+const squadDialogVisible = ref(false)
+const squadBusy = ref(false)
+const squadForm = reactive({ squad_name: '' })
 const currentTime = ref(new Date())
 let clockTimer: ReturnType<typeof setInterval> | undefined
 let clockSyncTimer: ReturnType<typeof setInterval> | undefined
@@ -180,23 +300,26 @@ const sortableDorms = ref<Dorm[]>([])
 const draggedDormName = ref('')
 
 // ── Student state ──
-const students = ref<{ id: string; stu_name: string }[]>([])
+type Student = { id: string; stu_name: string; phone_number: string }
+const students = ref<Student[]>([])
 const studentBusy = ref(false)
-const editingStudent = ref<{ id: string; stu_name: string } | null>(null)
-const studentEditForm = reactive({ id: '', stu_name: '' })
+const editingStudent = ref<Student | null>(null)
+const studentEditForm = reactive({ id: '', stu_name: '', phone_number: '' })
+const studentCreateVisible = ref(false)
+const studentCreateForm = reactive({ id: '', stu_name: '', phone_number: '' })
 const studentBatchDeleteVisible = ref(false)
 const studentBatchDeleteSelection = ref<string[]>([])
 const studentBatchDeleteFilters = reactive({ universalEnabled: false, universal: '', fieldEnabled: false, fields: [{ field: 'id', value: '' }] })
 
 // ── Deduction state ──
-type Deduction = { id: string; submit_date: string; student_name: string; recognized_students: string; recognized_student_ids: string[]; content: string; score: string }
+type Deduction = { id: string; submit_date: string; student_name: string; recognized_students: string; recognized_student_ids: string[]; content: string; score: string; include_weekly: boolean }
 const deductions = ref<Deduction[]>([])
 const deductionSearch = ref('')
 const deductionBusy = ref(false)
-const editingDeduction = ref<{ id: string; submit_date: string; student_name: string; content: string; score: string } | null>(null)
+const editingDeduction = ref<{ id: string; submit_date: string; student_name: string; content: string; score: string; include_weekly: boolean } | null>(null)
 const editingRecognition = ref<Deduction | null>(null)
 const recognizedStudentIDs = ref<string[]>([])
-const deductionEditForm = reactive({ id: '', submit_date: '', student_name: '', content: '', score: '' })
+const deductionEditForm = reactive({ id: '', submit_date: '', student_name: '', content: '', score: '', include_weekly: true })
 const deductionImportResult = ref<{ imported: number; errors?: string[] } | null>(null)
 const importResult = ref<{ imported: number; errors?: string[] } | null>(null)
 type MultiDeduction = { id: string; submit_date: string; dorm_name: string; content: string; score: number }
@@ -300,6 +423,7 @@ onMounted(async () => {
   if (page.value === 'semester') await loadSemesters()
   if (page.value === 'daily-management') await loadSemesters()
   if (page.value === 'daily-report') await loadDailyReport()
+  if (page.value === 'report-events') await loadReportEventPage()
   if (page.value === 'dorms') await loadDorms()
   if (page.value === 'students') await loadStudents()
   if (page.value === 'deductions') await loadDeductions()
@@ -334,6 +458,7 @@ watch(page, (newPage) => {
   if (newPage === 'workspace') loadWorkspaceStats()
   if (newPage === 'semester') loadSemesters()
   if (newPage === 'daily-management') loadSemesters()
+  if (newPage === 'report-events') loadReportEventPage()
   if (newPage === 'dorms') loadDorms()
   if (newPage === 'students') loadStudents()
   if (newPage === 'deductions') loadDeductions()
@@ -493,7 +618,7 @@ async function selectDailyWeek(index: number) {
 function formatDailyDate(value: string) { return value.slice(5).replace('-', '/') }
 function closeDailySummary() { dailySummaryVisible.value = false }
 
-type WeekRecords = { single: { id: string; date: string; content: string; score: number; student_ids: string[]; student_names: string }[]; multi: { id: string; date: string; content: string; score: number; subs: { sub_id: string; content: string; student_ids: string[]; student_names: string }[] }[] }
+type WeekRecords = { single: { id: string; submit_date: string; date: string; student_name: string; content: string; score: number; include_weekly: boolean; student_ids: string[]; student_names: string }[]; multi: { id: string; submit_date: string; date: string; dorm_name: string; content: string; score: number; subs: { sub_id: string; content: string; student_ids: string[]; student_names: string }[] }[] }
 const weekRecords = ref<WeekRecords>({ single: [], multi: [] })
 const weekRecordsBusy = ref(false)
 const weekBatchSingleIDs = ref<string[]>([])
@@ -540,6 +665,11 @@ async function loadWeekRecords() {
     if (res.ok) weekRecords.value = { single: res.single || [], multi: res.multi || [] }
   } catch (error: any) { ElMessage.error(error.message) }
   finally { weekRecordsBusy.value = false }
+}
+// 在「本周扣分条目汇总」中编辑/删除记录或子项后，同步刷新周详情与条目列表
+async function refreshWeekViewIfOpen() {
+  if (page.value !== 'daily-management' || !showWeekRecords.value || selectedDailyWeek.value === null) return
+  await selectDailyWeek(selectedDailyWeek.value)
 }
 function clearWeekBatchSelection() {
   weekBatchSingleIDs.value = []
@@ -810,20 +940,39 @@ async function saveDormOrder() {
 async function loadStudents() {
   studentBusy.value = true
   try {
-    const res = await api<{ students: { id: string; stu_name: string }[] }>('/api/students', { cache: 'no-store' })
+    const res = await api<{ students: Student[] }>('/api/students', { cache: 'no-store' })
     students.value = res.students
   } catch (error: any) { ElMessage.error(error.message) }
   finally { studentBusy.value = false }
 }
-function startEditStudent(s: { id: string; stu_name: string }) {
+function openCreateStudent() {
+  studentCreateForm.id = ''
+  studentCreateForm.stu_name = ''
+  studentCreateForm.phone_number = ''
+  studentCreateVisible.value = true
+}
+async function submitCreateStudent() {
+  if (!studentCreateForm.id.trim() || !studentCreateForm.stu_name.trim()) return ElMessage.warning('请填写学号和姓名')
+  studentBusy.value = true
+  try {
+    await api('/api/students', { method: 'POST', body: JSON.stringify(studentCreateForm) })
+    ElMessage.success('学生已新增')
+    studentCreateVisible.value = false
+    await loadStudents()
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { studentBusy.value = false }
+}
+function startEditStudent(s: Student) {
   editingStudent.value = s
   studentEditForm.stu_name = s.stu_name
   studentEditForm.id = s.id
+  studentEditForm.phone_number = s.phone_number || ''
 }
 function cancelEditStudent() {
   editingStudent.value = null
   studentEditForm.stu_name = ''
   studentEditForm.id = ''
+  studentEditForm.phone_number = ''
 }
 async function submitEditStudent() {
   if (!editingStudent.value) return
@@ -836,7 +985,7 @@ async function submitEditStudent() {
   } catch (error: any) { ElMessage.error(error.message) }
   finally { studentBusy.value = false }
 }
-async function deleteStudent(s: { id: number; name: string }) {
+async function deleteStudent(s: Student) {
   try {
     await ElMessageBox.confirm(`确定要删除学生 "${s.stu_name}" 吗？`, '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
   } catch { return }
@@ -890,15 +1039,30 @@ async function loadDeductions() {
 async function loadWorkspaceStats() {
   workspaceBusy.value = true
   try {
-    const [stats, semesterList] = await Promise.all([
+    const [stats, semesterList, squad] = await Promise.all([
       api<{ stats: WorkspaceStats }>('/api/workspace/stats', { cache: 'no-store' }),
-      api<{ semesters: Semester[] }>('/api/semesters', { cache: 'no-store' })
+      api<{ semesters: Semester[] }>('/api/semesters', { cache: 'no-store' }),
+      api<{ squad_name: string }>('/api/squad', { cache: 'no-store' })
     ])
     workspaceStats.value = stats.stats
     semesters.value = semesterList.semesters
+    squadName.value = squad.squad_name || ''
   }
   catch (error: any) { ElMessage.error(error.message) }
   finally { workspaceBusy.value = false }
+}
+function openSquadDialog() { squadForm.squad_name = squadName.value; squadDialogVisible.value = true }
+async function saveSquad() {
+  const name = squadForm.squad_name.trim()
+  if (!name) return ElMessage.warning('区队名称不能为空')
+  squadBusy.value = true
+  try {
+    await api('/api/squad', { method: 'PUT', body: JSON.stringify({ squad_name: name }) })
+    squadName.value = name
+    squadDialogVisible.value = false
+    ElMessage.success('区队名称已更新')
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { squadBusy.value = false }
 }
 async function openWorkspaceRecords(kind: 'out-of-semester' | 'unassigned' | 'multi-without-subrecords') {
   workspaceBusy.value = true
@@ -967,13 +1131,15 @@ async function submitEditRecognition() {
   } catch (error: any) { ElMessage.error(error.message) }
   finally { deductionBusy.value = false }
 }
-function startEditDeduction(r: { id: string; submit_date: string; student_name: string; content: string; score: string }) {
-  editingDeduction.value = r
+function startEditDeduction(r: { id: string; submit_date: string; student_name: string; content: string; score: string | number; include_weekly: boolean }) {
+  const include = r.include_weekly !== false
+  editingDeduction.value = { id: r.id, submit_date: r.submit_date, student_name: r.student_name, content: r.content, score: String(r.score ?? ''), include_weekly: include }
   deductionEditForm.id = r.id
   deductionEditForm.submit_date = r.submit_date
   deductionEditForm.student_name = r.student_name
   deductionEditForm.content = r.content
-  deductionEditForm.score = r.score
+  deductionEditForm.score = String(r.score ?? '')
+  deductionEditForm.include_weekly = include
 }
 function cancelEditDeduction() {
   editingDeduction.value = null
@@ -982,6 +1148,7 @@ function cancelEditDeduction() {
   deductionEditForm.student_name = ''
   deductionEditForm.content = ''
   deductionEditForm.score = ''
+  deductionEditForm.include_weekly = true
 }
 async function submitEditDeduction() {
   if (!editingDeduction.value) return
@@ -992,10 +1159,11 @@ async function submitEditDeduction() {
     ElMessage.success('记录已更新')
     cancelEditDeduction()
     await loadDeductions()
+    await refreshWeekViewIfOpen()
   } catch (error: any) { ElMessage.error(error.message) }
   finally { deductionBusy.value = false }
 }
-async function deleteDeduction(r: { id: number; record_id: string }) {
+async function deleteDeduction(r: { id: string | number }) {
   try {
     await ElMessageBox.confirm(`确定要删除记录 "${r.id}" 吗？`, '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
   } catch { return }
@@ -1004,6 +1172,7 @@ async function deleteDeduction(r: { id: number; record_id: string }) {
     await api(`/api/deductions/${r.id}`, { method: 'DELETE' })
     ElMessage.success('记录已删除')
     await loadDeductions()
+    await refreshWeekViewIfOpen()
   } catch (error: any) { ElMessage.error(error.message) }
   finally { deductionBusy.value = false }
 }
@@ -1073,7 +1242,7 @@ async function loadMultiDeductions() {
 }
 function startEditMultiDeduction(record: MultiDeduction) { editingMultiDeduction.value = record; multiDeductionForm.submit_date = record.submit_date; multiDeductionForm.dorm_name = record.dorm_name; multiDeductionForm.content = record.content; multiDeductionForm.score = record.score }
 function cancelEditMultiDeduction() { editingMultiDeduction.value = null }
-async function submitEditMultiDeduction() { if (!editingMultiDeduction.value) return; multiDeductionBusy.value = true; try { await api(`/api/multi-deductions/${editingMultiDeduction.value.id}`, { method: 'PUT', body: JSON.stringify(multiDeductionForm) }); cancelEditMultiDeduction(); await loadMultiDeductions(); ElMessage.success('记录已更新') } catch (error: any) { ElMessage.error(error.message) } finally { multiDeductionBusy.value = false } }
+async function submitEditMultiDeduction() { if (!editingMultiDeduction.value) return; multiDeductionBusy.value = true; try { await api(`/api/multi-deductions/${editingMultiDeduction.value.id}`, { method: 'PUT', body: JSON.stringify(multiDeductionForm) }); cancelEditMultiDeduction(); await loadMultiDeductions(); await refreshWeekViewIfOpen(); ElMessage.success('记录已更新') } catch (error: any) { ElMessage.error(error.message) } finally { multiDeductionBusy.value = false } }
 function onMultiDeductionSelectionChange(records: MultiDeduction[]) { selectedMultiDeductionIDs.value = records.map((record) => record.id) }
 function openMultiBatchDelete() { multiBatchDeleteSelection.value = []; multiBatchDeleteVisible.value = true }
 function addMultiBatchField() { multiBatchDeleteFilters.fields.push({ field: 'id', value: '' }) }
@@ -1087,6 +1256,7 @@ async function deleteMultiDeduction(record: MultiDeduction) {
   try {
     const result = await api<{ deleted: number }>('/api/multi-deductions/batch-delete', { method: 'POST', body: JSON.stringify({ ids: [record.id] }) })
     await loadMultiDeductions()
+    await refreshWeekViewIfOpen()
     ElMessage.success(`已删除 ${result.deleted} 条记录`)
   } catch (error: any) { ElMessage.error(error.message) }
   finally { multiDeductionBusy.value = false }
@@ -1126,14 +1296,14 @@ async function saveMultiSubrecord() {
   multiDeductionBusy.value = true
   try {
     await api(`/api/multi-deductions/${managingSubrecords.value.id}/subrecords`, { method: 'PUT', body: JSON.stringify(multiSubrecordForm) })
-    await loadMultiSubrecords(managingSubrecords.value.id); resetMultiSubrecordForm(); ElMessage.success('子项已保存')
+    await loadMultiSubrecords(managingSubrecords.value.id); resetMultiSubrecordForm(); await refreshWeekViewIfOpen(); ElMessage.success('子项已保存')
   } catch (error: any) { ElMessage.error(error.message) }
   finally { multiDeductionBusy.value = false }
 }
 async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
   if (!managingSubrecords.value) return
   try { await ElMessageBox.confirm('确定删除该子项吗？', '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }) } catch { return }
-  try { await api(`/api/multi-deductions/${managingSubrecords.value.id}/subrecords/${subrecord.id}`, { method: 'DELETE' }); await loadMultiSubrecords(managingSubrecords.value.id); resetMultiSubrecordForm() }
+  try { await api(`/api/multi-deductions/${managingSubrecords.value.id}/subrecords/${subrecord.id}`, { method: 'DELETE' }); await loadMultiSubrecords(managingSubrecords.value.id); resetMultiSubrecordForm(); await refreshWeekViewIfOpen() }
   catch (error: any) { ElMessage.error(error.message) }
 }
 </script>
@@ -1158,12 +1328,12 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
   <div v-else-if="authReady" class="layout-shell">
     <aside class="layout-sidebar">
       <div class="sidebar-brand"><img src="/icon.png" alt="" style="width:50px;height:50px;object-fit:contain" /><strong>纪检工作台</strong></div>
-      <nav><a :class="{ active: page === 'workspace' }" href="/workspace">工作台</a><a :class="{ active: page === 'daily-management' }" href="/daily-management">日常综合管理</a><a :class="{ active: page === 'dorms' }" href="/dorms">寝室管理</a><a :class="{ active: page === 'semester' }" href="/semester">学期管理</a><a :class="{ active: page === 'students' }" href="/students">学生管理</a><a :class="{ active: page === 'deductions' }" href="/deductions">常规扣分记录管理</a><a :class="{ active: page === 'multi-deductions' }" href="/multi-deductions">寝室整体差扣分记录管理</a><a :class="{ active: page === 'daily-report' }" href="/daily-report">警务化管理每日播报</a><a :class="{ active: page === 'password' }" href="/change-password">修改密码</a></nav>
+      <nav><a :class="{ active: page === 'workspace' }" href="/workspace">工作台</a><a :class="{ active: page === 'daily-management' }" href="/daily-management">日常综合管理</a><a :class="{ active: page === 'dorms' }" href="/dorms">寝室管理</a><a :class="{ active: page === 'semester' }" href="/semester">学期管理</a><a :class="{ active: page === 'students' }" href="/students">学生管理</a><a :class="{ active: page === 'deductions' }" href="/deductions">常规扣分记录管理</a><a :class="{ active: page === 'multi-deductions' }" href="/multi-deductions">寝室整体差扣分记录管理</a><a :class="{ active: page === 'daily-report' }" href="/daily-report">警务化管理每日播报</a><a :class="{ active: page === 'report-events' }" href="/report-events">定时通知管理</a><a :class="{ active: page === 'password' }" href="/change-password">修改密码</a></nav>
       <div class="sidebar-spacer"></div>
       <ElButton class="sidebar-logout" text @click="logout">退出登录</ElButton>
     </aside>
     <div class="layout-main">
-      <header class="top-bar"><strong>{{ page === 'daily-report' ? '警务化管理每日播报' : page === 'password' ? '修改密码' : page === 'daily-management' ? '日常综合管理' : page === 'dorms' ? '寝室管理' : page === 'students' ? '学生管理' : page === 'deductions' ? '常规扣分记录管理' : page === 'multi-deductions' ? '寝室整体差扣分记录管理' : page === 'semester' ? '学期管理' : '工作台' }}</strong><time class="top-bar-clock">{{ currentTimeText }}</time></header>
+      <header class="top-bar"><strong>{{ page === 'daily-report' ? '警务化管理每日播报' : page === 'report-events' ? '定时通知管理' : page === 'password' ? '修改密码' : page === 'daily-management' ? '日常综合管理' : page === 'dorms' ? '寝室管理' : page === 'students' ? '学生管理' : page === 'deductions' ? '常规扣分记录管理' : page === 'multi-deductions' ? '寝室整体差扣分记录管理' : page === 'semester' ? '学期管理' : '工作台' }}</strong><time class="top-bar-clock">{{ currentTimeText }}</time></header>
       <main class="page-area">
         <!-- 申诉模板导出弹窗：所有页面共享（常规扣分/整体差/日常管理等操作列均可打开） -->
         <ElDialog v-model="appealDialogVisible" :title="appealIsSchool ? '校督申诉模板导出' : '大队督察申诉模板导出'" width="620px" @close="appealRecord = null">
@@ -1199,9 +1369,48 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             </div>
           </div>
         </ElDialog>
+        <!-- 常规扣分/寝室整体差编辑与子项管理弹窗：所有页面共享（扣分记录管理、整体差管理、本周扣分条目汇总） -->
+        <ElDialog :model-value="!!editingDeduction" title="编辑扣分记录" width="500px" @close="cancelEditDeduction">
+          <ElForm label-position="top" @submit.prevent="submitEditDeduction">
+            <ElFormItem label="记录ID">
+              <ElInput v-model="deductionEditForm.id" disabled />
+            </ElFormItem>
+            <ElFormItem label="姓名">
+              <ElInput v-model="deductionEditForm.student_name" />
+            </ElFormItem>
+            <ElFormItem label="日期">
+              <ElInput v-model="deductionEditForm.submit_date" placeholder="YYYY-MM-DD" />
+            </ElFormItem>
+            <ElFormItem label="扣分项目">
+              <ElInput v-model="deductionEditForm.content" />
+            </ElFormItem>
+            <ElFormItem label="分数">
+              <ElInput v-model="deductionEditForm.score" />
+            </ElFormItem>
+            <ElFormItem label="是否计入区队周扣分">
+              <ElSwitch v-model="deductionEditForm.include_weekly" active-text="是" inactive-text="否" />
+            </ElFormItem>
+            <div style="display:flex;gap:10px;justify-content:flex-end;">
+              <ElButton @click="cancelEditDeduction">取消</ElButton>
+              <ElButton type="primary" native-type="submit" :loading="deductionBusy">保存</ElButton>
+            </div>
+          </ElForm>
+        </ElDialog>
+        <ElDialog :model-value="!!editingMultiDeduction" title="编辑寝室整体差记录" width="500px" @close="cancelEditMultiDeduction"><ElForm label-position="top" @submit.prevent="submitEditMultiDeduction"><ElFormItem label="日期"><ElInput v-model="multiDeductionForm.submit_date" disabled /></ElFormItem><ElFormItem label="寝室名称"><ElInput v-model="multiDeductionForm.dorm_name" /></ElFormItem><ElFormItem label="扣分项目"><ElInput v-model="multiDeductionForm.content" /></ElFormItem><ElFormItem label="分数"><ElInputNumber v-model="multiDeductionForm.score" :min="0" style="width:100%" /></ElFormItem><div style="display:flex;gap:10px;justify-content:flex-end"><ElButton @click="cancelEditMultiDeduction">取消</ElButton><ElButton type="primary" native-type="submit" :loading="multiDeductionBusy">保存</ElButton></div></ElForm></ElDialog>
+        <ElDialog :model-value="!!managingSubrecords" title="子项管理" width="760px" @close="managingSubrecords = null">
+          <ElForm label-position="top" @submit.prevent="saveMultiSubrecord">
+            <ElFormItem label="日期"><ElInput :model-value="managingSubrecords?.submit_date || ''" readonly /></ElFormItem>
+            <ElFormItem label="扣分记录内容"><ElInput :model-value="managingSubrecords?.content || ''" readonly /></ElFormItem>
+            <ElFormItem label="子项内容"><ElInput v-model="multiSubrecordForm.content" /></ElFormItem>
+            <ElFormItem label="负责同学"><ElSelect v-model="multiSubrecordForm.student_ids" multiple filterable clearable placeholder="搜索学号或姓名" style="width:100%"><ElOption v-for="student in students" :key="student.id" :label="`${student.stu_name} (${student.id})`" :value="student.id" /></ElSelect></ElFormItem>
+            <div style="display:flex;gap:10px;justify-content:flex-end"><ElButton @click="resetMultiSubrecordForm">取消编辑</ElButton><ElButton type="primary" native-type="submit" :loading="multiDeductionBusy">保存子项</ElButton></div>
+          </ElForm>
+          <ElTable :data="multiSubrecords" border stripe style="width:100%;margin-top:20px"><ElTableColumn prop="content" label="子项内容" min-width="200" /><ElTableColumn prop="student_names" label="负责同学" min-width="180" /><ElTableColumn label="操作" width="130"><template #default="{ row }"><ElButton type="primary" text @click="editMultiSubrecord(row)">编辑</ElButton><ElButton type="danger" text @click="deleteMultiSubrecord(row)">删除</ElButton></template></ElTableColumn></ElTable>
+        </ElDialog>
         <section v-if="page === 'workspace'" class="page-content workspace-page" v-loading="workspaceBusy">
           <div class="workspace-heading"><div><h1>纪检工作台</h1><p>扣分记录与认定情况概览</p></div></div>
           <div class="workspace-stat-grid">
+            <button class="workspace-stat-card workspace-card-button stat-blue" @click="openSquadDialog()"><span class="workspace-stat-label">区队</span><strong>{{ squadName || '未设置' }}</strong><small>点击修改区队名称</small></button>
             <article class="workspace-stat-card stat-blue"><span class="workspace-stat-label">常规扣分数目</span><strong>{{ workspaceStats.single_deduction_count }}</strong><small>条常规扣分记录</small></article>
             <article class="workspace-stat-card stat-green"><span class="workspace-stat-label">寝室整体差扣分数目</span><strong>{{ workspaceStats.multi_deduction_count }}</strong><small>条寝室整体差记录</small></article>
             <button class="workspace-stat-card stat-orange workspace-card-button" @click="openWorkspaceRecords('multi-without-subrecords')"><span class="workspace-stat-label">无子项寝室整体差</span><strong>{{ workspaceStats.multi_without_subrecords_count }}</strong><small>点击查看具体条目</small></button>
@@ -1211,6 +1420,18 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             <article v-if="activeSemesterNow" class="workspace-stat-card current-semester-card"><span class="workspace-stat-label">当前学期</span><strong>{{ activeSemesterNow.semester_name }}</strong><small>{{ activeSemesterNow.start_time }} 至 {{ activeSemesterNow.end_time }}</small></article>
             <article v-if="workspaceStats.duty_dorm_name" class="workspace-stat-card duty-dorm-card"><span class="workspace-stat-label">本周包干区负责寝室</span><strong>{{ workspaceStats.duty_dorm_name }}</strong><small>按当前学期轮值顺序安排</small></article>
           </div>
+          <ElDialog v-model="squadDialogVisible" title="修改区队名称" width="420px">
+            <ElForm label-position="top" @submit.prevent="saveSquad">
+              <ElFormItem label="区队名称">
+                <ElInput v-model="squadForm.squad_name" placeholder="如：24网安二" />
+              </ElFormItem>
+              <div style="font-size:0.75em;color:#909399">导入「警务化管理通报」表格时，只导入该区队的扣分记录。</div>
+            </ElForm>
+            <template #footer>
+              <ElButton @click="squadDialogVisible = false">取消</ElButton>
+              <ElButton type="primary" :loading="squadBusy" @click="saveSquad">保存</ElButton>
+            </template>
+          </ElDialog>
           <ElDialog v-model="workspaceRecordsVisible" :title="workspaceRecordsTitle" width="860px">
             <div class="workspace-record-section"><h3>常规扣分记录（{{ workspaceRecords.single.length }}）</h3><ElTable :data="workspaceRecords.single" border stripe max-height="220"><ElTableColumn prop="submit_date" label="日期" width="165" /><ElTableColumn prop="student_name" label="姓名" width="130" /><ElTableColumn prop="content" label="扣分内容" min-width="220" /><ElTableColumn prop="score" label="分数" width="80" /></ElTable></div>
             <div class="workspace-record-section"><h3>寝室整体差扣分记录（{{ workspaceRecords.multi.length }}）</h3><ElTable :data="workspaceRecords.multi" border stripe max-height="220"><ElTableColumn prop="submit_date" label="日期" width="165" /><ElTableColumn prop="dorm_name" label="寝室名称" width="130" /><ElTableColumn prop="content" label="扣分项目" min-width="220" /><ElTableColumn prop="score" label="分数" width="80" /></ElTable></div>
@@ -1224,6 +1445,84 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
           <ElDialog v-model="reportDateVisible" title="选择日期播报" width="420px"><ElForm label-position="top"><ElFormItem label="播报日期"><ElDatePicker v-model="selectedReportDate" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" /></ElFormItem></ElForm><template #footer><ElButton @click="reportDateVisible=false">取消</ElButton><ElButton type="primary" :loading="dailyReportBusy" @click="runDailyReportForDate">确认播报</ElButton></template></ElDialog>
           <ElDialog v-model="reportConfigVisible" title="播报配置" width="600px"><ElForm label-position="top"><ElFormItem label="全局状态"><ElSwitch v-model="reportConfig.set_status" :active-value="1" :inactive-value="0" active-text="全局启用" inactive-text="全局禁用" /></ElFormItem><ElFormItem label="VPN 登录地址"><ElInput v-model="reportConfig.vpn_login_url" /></ElFormItem><ElFormItem label="VPN 用户名"><ElInput v-model="reportConfig.username_vpn" /></ElFormItem><ElFormItem label="VPN 密码"><ElInput v-model="reportConfig.password_vpn" show-password /></ElFormItem><ElFormItem label="内网警务化管理服务器地址"><ElInput v-model="reportConfig.vpn_police_style_server_url" /></ElFormItem><ElFormItem label="服务器用户名"><ElInput v-model="reportConfig.username_police_style_server" /></ElFormItem><ElFormItem label="服务器密码"><ElInput v-model="reportConfig.password_police_style_server" show-password /></ElFormItem><ElFormItem label="每日播报时间"><ElTimePicker v-model="reportConfig.fetch_time_everyday" format="HH:mm" value-format="HH:mm" /></ElFormItem><ElFormItem label="自动入库"><ElSwitch v-model="reportConfig.auto_import" :active-value="1" :inactive-value="0" active-text="开启" inactive-text="关闭" /><div style="font-size:0.75em;color:#909399;margin-top:4px">每次播报日志入库后，自动把当批违规记录导入常规扣分记录管理</div></ElFormItem></ElForm><template #footer><ElButton @click="reportConfigVisible=false">取消</ElButton><ElButton type="primary" @click="saveDailyReport();reportConfigVisible=false">保存</ElButton></template></ElDialog>
           <ElDialog v-model="robotVisible" title="钉钉机器人管理" width="980px" @close="editingRobot=null"><ElForm inline><ElFormItem label="机器人名称"><ElInput v-model="robotForm.robot_name" /></ElFormItem><ElFormItem label="机器人地址"><ElInput v-model="robotForm.dingtalk_webbook_url" /></ElFormItem><ElFormItem label="加签密钥"><ElInput v-model="robotForm.dingtalk_webbook_password" show-password /></ElFormItem><ElFormItem><ElButton type="primary" @click="saveRobot">新增机器人</ElButton></ElFormItem></ElForm><ElTable :data="reportRobots" border stripe><ElTableColumn prop="robot_name" label="机器人名称" width="160" /><ElTableColumn label="机器人地址" min-width="300"><template #default="{ row }"><ElInput v-if="editingRobot && editingRobot.robot_name===row.robot_name" v-model="editingRobot.dingtalk_webbook_url" /><span v-else>{{ maskRobotValue(row.dingtalk_webbook_url) }}</span></template></ElTableColumn><ElTableColumn label="加签密钥" min-width="180"><template #default="{ row }"><ElInput v-if="editingRobot && editingRobot.robot_name===row.robot_name" v-model="editingRobot.dingtalk_webbook_password" type="password" /><span v-else>{{ maskRobotValue(row.dingtalk_webbook_password, true) }}</span></template></ElTableColumn><ElTableColumn label="启用" width="90"><template #default="{ row }"><ElSwitch v-model="row.set_status" :active-value="1" :inactive-value="0" @change="toggleRobot(row)" /></template></ElTableColumn><ElTableColumn label="操作" width="140"><template #default="{ row }"><ElButton type="primary" text @click.stop="editingRobot && editingRobot.robot_name===row.robot_name ? saveEditingRobot() : editRobot(row)">{{ editingRobot && editingRobot.robot_name===row.robot_name ? '保存' : '编辑' }}</ElButton><ElButton type="danger" text @click.stop="deleteRobot(row)">删除</ElButton></template></ElTableColumn></ElTable></ElDialog>
+        </section>
+        <section v-else-if="page === 'report-events'" class="page-content art-card report-events-page-content">
+          <div class="semester-toolbar">
+            <h2 class="semester-title">定时通知管理</h2>
+            <div style="display:flex;gap:10px;align-items:center">
+              <ElButton :loading="reportEventBusy" @click="loadReportEvents">刷新</ElButton>
+              <ElButton type="primary" class="custom-height" @click="openCreateReportEvent">新增定时通知</ElButton>
+            </div>
+          </div>
+          <div class="report-events-hint">定时通知按计划播报时间自动发送到所选机器人（不受机器人「启用/禁用」影响，该开关仅约束周报）；发送结果写入日志，失败后可点「重试」手动补发。</div>
+          <div class="report-events-table-wrap">
+            <ElTable :data="sortedReportEvents" v-loading="reportEventBusy" border stripe style="width:100%">
+              <ElTableColumn prop="id" label="通知ID" width="90" />
+              <ElTableColumn prop="scheduled_time" label="计划播报时间" width="180" />
+              <ElTableColumn label="播报状态" width="110">
+                <template #default="{ row }">
+                  <ElTag :type="reportEventStatusType(row.status)" size="small">{{ reportEventStatusText(row.status) }}</ElTag>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn label="预计发布内容" min-width="300">
+                <template #default="{ row }">
+                  <span class="report-event-content">{{ formatReportEventContent(row.content) }}</span>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn label="发送的机器人" min-width="150">
+                <template #default="{ row }">{{ (row.robots || []).join('、') || '未配置' }}</template>
+              </ElTableColumn>
+              <ElTableColumn label="日志" min-width="220">
+                <template #default="{ row }">
+                  <ElTooltip v-if="row.logs" placement="top" :show-after="200">
+                    <template #content><div style="max-width:520px;white-space:pre-wrap">{{ row.logs }}</div></template>
+                    <span class="report-event-logs">{{ row.logs }}</span>
+                  </ElTooltip>
+                  <span v-else style="color:#909399">无</span>
+                </template>
+              </ElTableColumn>
+              <ElTableColumn label="操作" width="190" fixed="right">
+                <template #default="{ row }">
+                  <ElButton type="primary" text @click="openEditReportEvent(row)">编辑</ElButton>
+                  <ElButton :type="row.status === 2 ? 'warning' : 'success'" text @click="testReportEvent(row)">{{ reportEventActionText(row) }}</ElButton>
+                  <ElButton type="danger" text @click="deleteReportEvent(row)">删除</ElButton>
+                </template>
+              </ElTableColumn>
+            </ElTable>
+          </div>
+          <ElDialog v-model="reportEventDialogVisible" :title="editingReportEvent ? `编辑定时通知 #${editingReportEvent.id}` : '新增定时通知'" width="700px">
+            <ElForm label-position="top">
+              <ElFormItem label="计划播报日期（日历表）">
+                <ElDatePicker v-model="reportEventForm.scheduled_date" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" />
+              </ElFormItem>
+              <ElFormItem label="计划播报时刻（时刻表）">
+                <ElTimePicker v-model="reportEventForm.scheduled_clock" format="HH:mm" value-format="HH:mm" placeholder="请选择时刻" style="width:100%" />
+              </ElFormItem>
+              <ElFormItem label="播报内容">
+                <ElMention
+                  v-model="reportEventForm.content"
+                  type="textarea"
+                  :rows="6"
+                  :options="mentionOptions"
+                  prefix="@"
+                  split=" "
+                  :whole="true"
+                  placeholder="输入 @ 可选择同学（插入其手机号，实现钉钉 @），支持 @ 多人"
+                />
+                <div style="font-size:0.75em;color:#909399;margin-top:4px">输入「@」会列出同学姓名，选择后插入「@手机号」；发送时钉钉会真正 @ 到该同学。</div>
+              </ElFormItem>
+              <ElFormItem label="发送的机器人">
+                <ElSelect v-model="reportEventForm.robots" multiple filterable clearable placeholder="选择一个或多个机器人" style="width:100%">
+                  <ElOption v-for="option in reportEventRobotOptions" :key="option.value" :label="option.label" :value="option.value" />
+                </ElSelect>
+                <div style="font-size:0.75em;color:#909399;margin-top:4px">已禁用的机器人同样会被发送（启用/禁用仅约束周报）。</div>
+              </ElFormItem>
+            </ElForm>
+            <template #footer>
+              <ElButton @click="reportEventDialogVisible = false">取消</ElButton>
+              <ElButton type="primary" :loading="reportEventBusy" @click="submitReportEvent">保存</ElButton>
+            </template>
+          </ElDialog>
         </section>
         <section v-else-if="page === 'daily-management'" class="page-content daily-management-page">
           <template v-if="!dailyManagementSemester">
@@ -1245,7 +1544,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
     <ElTableColumn prop="content" label="扣分项目" min-width="200" />
     <ElTableColumn prop="score" label="分数" width="80" />
     <ElTableColumn prop="student_names" label="认定学生" min-width="160" />
-    <ElTableColumn label="操作" width="120"><template #default="{ row }"><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
+    <ElTableColumn label="操作" width="270"><template #default="{ row }"><ElButton type="primary" size="small" @click="startEditDeduction(row)">编辑</ElButton><ElButton type="danger" size="small" @click="deleteDeduction(row)">删除</ElButton><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
       </ElTable>
   <h3>寝室整体差扣分项目</h3>
   <ElTable :data="filteredWeekMulti" border stripe style="width:100%">
@@ -1262,7 +1561,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
     <ElTableColumn prop="date" label="日期" width="110" />
     <ElTableColumn prop="content" label="扣分项目" min-width="220" />
     <ElTableColumn prop="score" label="分数" width="80" />
-    <ElTableColumn label="操作" width="120"><template #default="{ row }"><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
+    <ElTableColumn label="操作" width="340"><template #default="{ row }"><ElButton type="primary" size="small" @click="startEditMultiDeduction(row)">编辑</ElButton><ElButton type="danger" size="small" @click="deleteMultiDeduction(row)">删除</ElButton><ElButton type="primary" size="small" @click="openSubrecords(row)">子项管理</ElButton><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
       </ElTable>
 </div>
 <div v-else class="daily-score-table-wrap"><div v-if="!dailySummaryVisible" class="daily-discipline-list"><strong>第 {{ (selectedDailyWeek ?? 0) + 1 }} 周个人惩戒名单：</strong><strong v-if="!punishmentList.length">无</strong><template v-else><template v-for="(entry, i) in punishmentList" :key="entry.student_id"><ElButton type="primary" link @click="openPunishmentDetail(entry)">{{ entry.student_name }}</ElButton><span v-if="i < punishmentList.length - 1">、</span></template></template></div><ElTable :data="dailySummaryVisible ? dailySummaryRows : dailyWeekData.rows" :row-class-name="dailySummaryVisible ? undefined : dailyRowClassName" border stripe style="width:100%"><ElTableColumn prop="id" label="学号" width="115" fixed="left" /><ElTableColumn prop="name" label="姓名" width="100" fixed="left" /><ElTableColumn v-if="dailySummaryVisible" prop="total" label="总扣分" width="120" fixed="left"><template #default="{ row }">{{ formatSummaryScore(row.total) }}</template></ElTableColumn><template v-if="dailySummaryVisible"><ElTableColumn v-for="week in dailyWeeks" :key="week.index" :label="`第${week.index + 1}周 (${formatDailyDate(week.start)}~${formatDailyDate(week.end)})`" width="180" align="center"><template #default="{ row }">{{ formatSummaryScore(row.scores[`week_${week.index}`] || 0) }}</template></ElTableColumn></template><template v-else><ElTableColumn v-for="date in dailyWeekData.week.dates" :key="date" :label="formatDailyDate(date)" width="96" align="center"><template #default="{ row }">{{ formatDailyCellScore(row.scores[date] || 0) }}</template></ElTableColumn><ElTableColumn label="个人总计" width="120" fixed="right" align="center"><template #default="{ row }">{{ formatSummaryScore(dailyRowTotal(row)) }}</template></ElTableColumn></template></ElTable></div>
@@ -1404,6 +1703,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
           <div class="semester-toolbar">
             <h2 class="semester-title">学生管理</h2>
             <div style="display:flex;gap:10px;">
+              <ElButton type="primary" class="custom-height" @click="openCreateStudent">新增学生</ElButton>
               <ElButton type="primary" class="custom-height" @click="downloadTemplate">模板下载</ElButton>
               <ElUpload :show-file-list="false" :before-upload="(f) => { importStudents(f); return false }" accept=".xlsx">
                 <ElButton type="success" class="custom-height" :loading="studentBusy">导入 Excel</ElButton>
@@ -1424,6 +1724,9 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             <ElTable :data="students" v-loading="studentBusy" border stripe style="width:100%">
               <ElTableColumn prop="id" label="学号" width="180" />
               <ElTableColumn prop="stu_name" label="姓名" width="180" />
+              <ElTableColumn prop="phone_number" label="手机号" min-width="200">
+                <template #default="{ row }">{{ row.phone_number || '未填写' }}</template>
+              </ElTableColumn>
               <ElTableColumn label="操作" width="180">
                 <template #default="{ row }">
                   <ElButton type="primary" text size="small" @click="startEditStudent(row)">编辑</ElButton>
@@ -1433,6 +1736,24 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             </ElTable>
           </div>
 
+          <ElDialog v-model="studentCreateVisible" title="新增学生" width="400px">
+            <ElForm label-position="top" @submit.prevent="submitCreateStudent">
+              <ElFormItem label="学号">
+                <ElInput v-model.trim="studentCreateForm.id" placeholder="如：2407077" />
+              </ElFormItem>
+              <ElFormItem label="姓名">
+                <ElInput v-model.trim="studentCreateForm.stu_name" />
+              </ElFormItem>
+              <ElFormItem label="手机号">
+                <ElInput v-model.trim="studentCreateForm.phone_number" placeholder="用于定时通知 @ 学生" />
+              </ElFormItem>
+              <div style="display:flex;gap:10px;justify-content:flex-end;">
+                <ElButton @click="studentCreateVisible = false">取消</ElButton>
+                <ElButton type="primary" native-type="submit" :loading="studentBusy">保存</ElButton>
+              </div>
+            </ElForm>
+          </ElDialog>
+
           <ElDialog :model-value="!!editingStudent" title="编辑学生" width="400px" @close="cancelEditStudent">
             <ElForm label-position="top" @submit.prevent="submitEditStudent">
               <ElFormItem label="学号">
@@ -1440,6 +1761,9 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               </ElFormItem>
               <ElFormItem label="姓名">
                 <ElInput v-model="studentEditForm.stu_name" />
+              </ElFormItem>
+              <ElFormItem label="手机号">
+                <ElInput v-model.trim="studentEditForm.phone_number" placeholder="用于定时通知 @ 学生" />
               </ElFormItem>
               <div style="display:flex;gap:10px;justify-content:flex-end;">
                 <ElButton @click="cancelEditStudent">取消</ElButton>
@@ -1494,7 +1818,6 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElTableColumn label="操作" width="400"><template #default="{ row }"><ElButton type="primary" text @click="startEditMultiDeduction(row)">编辑</ElButton><ElButton type="primary" text @click="openAppeal(row)">导出申诉模板</ElButton><ElButton type="primary" text @click="openSubrecords(row)">子项管理</ElButton><ElButton type="danger" text @click="deleteMultiDeduction(row)">删除</ElButton></template></ElTableColumn>
             </ElTable>
           </div>
-          <ElDialog :model-value="!!editingMultiDeduction" title="编辑寝室整体差记录" width="500px" @close="cancelEditMultiDeduction"><ElForm label-position="top" @submit.prevent="submitEditMultiDeduction"><ElFormItem label="日期"><ElInput v-model="multiDeductionForm.submit_date" disabled /></ElFormItem><ElFormItem label="寝室名称"><ElInput v-model="multiDeductionForm.dorm_name" /></ElFormItem><ElFormItem label="扣分项目"><ElInput v-model="multiDeductionForm.content" /></ElFormItem><ElFormItem label="分数"><ElInputNumber v-model="multiDeductionForm.score" :min="0" style="width:100%" /></ElFormItem><div style="display:flex;gap:10px;justify-content:flex-end"><ElButton @click="cancelEditMultiDeduction">取消</ElButton><ElButton type="primary" native-type="submit" :loading="multiDeductionBusy">保存</ElButton></div></ElForm></ElDialog>
           <ElDialog v-model="multiBatchDeleteVisible" title="批量删除寝室整体差记录" width="760px">
             <ElForm label-position="top">
               <ElFormItem><ElCheckbox v-model="multiBatchDeleteFilters.universalEnabled">字段包含</ElCheckbox><ElInput v-model="multiBatchDeleteFilters.universal" :disabled="!multiBatchDeleteFilters.universalEnabled" placeholder="搜索 ID、日期、寝室、项目或分数" style="margin-top:8px" /></ElFormItem>
@@ -1503,16 +1826,6 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             </ElForm>
             <div class="batch-delete-preview"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span>匹配 {{ multiBatchDeleteCandidates.length }} 条，已选择 {{ multiBatchDeleteSelection.length }} 条</span><ElCheckbox :model-value="multiBatchDeleteCandidates.length > 0 && multiBatchDeleteSelection.length === multiBatchDeleteCandidates.length" @change="toggleMultiBatchSelection">全选</ElCheckbox></div><ElCheckboxGroup v-model="multiBatchDeleteSelection" class="batch-delete-list"><ElCheckbox v-for="record in multiBatchDeleteCandidates" :key="record.id" :value="record.id">{{ record.submit_date }} · {{ record.dorm_name }} · {{ record.content }} · {{ record.score }}</ElCheckbox></ElCheckboxGroup></div>
             <template #footer><ElButton @click="multiBatchDeleteVisible = false">取消</ElButton><ElButton type="danger" :loading="multiDeductionBusy" @click="submitMultiBatchDelete">删除已选</ElButton></template>
-          </ElDialog>
-          <ElDialog :model-value="!!managingSubrecords" title="子项管理" width="760px" @close="managingSubrecords = null">
-            <ElForm label-position="top" @submit.prevent="saveMultiSubrecord">
-              <ElFormItem label="日期"><ElInput :model-value="managingSubrecords?.submit_date || ''" readonly /></ElFormItem>
-              <ElFormItem label="扣分记录内容"><ElInput :model-value="managingSubrecords?.content || ''" readonly /></ElFormItem>
-              <ElFormItem label="子项内容"><ElInput v-model="multiSubrecordForm.content" /></ElFormItem>
-              <ElFormItem label="负责同学"><ElSelect v-model="multiSubrecordForm.student_ids" multiple filterable clearable placeholder="搜索学号或姓名" style="width:100%"><ElOption v-for="student in students" :key="student.id" :label="`${student.stu_name} (${student.id})`" :value="student.id" /></ElSelect></ElFormItem>
-              <div style="display:flex;gap:10px;justify-content:flex-end"><ElButton @click="resetMultiSubrecordForm">取消编辑</ElButton><ElButton type="primary" native-type="submit" :loading="multiDeductionBusy">保存子项</ElButton></div>
-            </ElForm>
-            <ElTable :data="multiSubrecords" border stripe style="width:100%;margin-top:20px"><ElTableColumn prop="content" label="子项内容" min-width="200" /><ElTableColumn prop="student_names" label="负责同学" min-width="180" /><ElTableColumn label="操作" width="130"><template #default="{ row }"><ElButton type="primary" text @click="editMultiSubrecord(row)">编辑</ElButton><ElButton type="danger" text @click="deleteMultiSubrecord(row)">删除</ElButton></template></ElTableColumn></ElTable>
           </ElDialog>
         </section>
 
@@ -1552,6 +1865,11 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElTableColumn prop="submit_date" label="日期" width="130" />
               <ElTableColumn prop="content" label="扣分内容" min-width="180" />
               <ElTableColumn prop="score" label="分数" width="80" />
+              <ElTableColumn label="是否计入区队周扣分" width="160">
+                <template #default="{ row }">
+                  <span>{{ row.include_weekly ? '是' : '否' }}</span>
+                </template>
+              </ElTableColumn>
               <ElTableColumn label="操作" width="270">
                 <template #default="{ row }">
                   <ElButton type="primary" text size="small" @click="startEditDeduction(row)">编辑</ElButton>
@@ -1561,30 +1879,6 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               </ElTableColumn>
             </ElTable>
           </div>
-
-          <ElDialog :model-value="!!editingDeduction" title="编辑扣分记录" width="500px" @close="cancelEditDeduction">
-            <ElForm label-position="top" @submit.prevent="submitEditDeduction">
-              <ElFormItem label="记录ID">
-                <ElInput v-model="deductionEditForm.id" disabled />
-              </ElFormItem>
-              <ElFormItem label="姓名">
-                <ElInput v-model="deductionEditForm.student_name" />
-              </ElFormItem>
-              <ElFormItem label="日期">
-                <ElInput v-model="deductionEditForm.submit_date" placeholder="YYYY-MM-DD" />
-              </ElFormItem>
-              <ElFormItem label="扣分项目">
-                <ElInput v-model="deductionEditForm.content" />
-              </ElFormItem>
-              <ElFormItem label="分数">
-                <ElInput v-model="deductionEditForm.score" />
-              </ElFormItem>
-              <div style="display:flex;gap:10px;justify-content:flex-end;">
-                <ElButton @click="cancelEditDeduction">取消</ElButton>
-                <ElButton type="primary" native-type="submit" :loading="deductionBusy">保存</ElButton>
-              </div>
-            </ElForm>
-          </ElDialog>
 
           <ElDialog :model-value="!!editingRecognition" title="编辑认定" width="500px" @close="cancelEditRecognition">
             <ElForm label-position="top" @submit.prevent="submitEditRecognition">

@@ -1023,7 +1023,7 @@ func (a *App) formatWeeklySummaryMarkdown(today string) (string, error) {
 	for _, student := range students {
 		byID[student.ID] = &dailyStudentRow{ID: student.ID, Name: student.Name, Scores: make(map[string]float64)}
 	}
-	if err := a.fillDailyScores(byID, weekStart, weekEnd); err != nil {
+	if err := a.fillDailyScores(byID, weekStart, weekEnd, false); err != nil {
 		return "", err
 	}
 
@@ -1788,7 +1788,14 @@ func setPoliceHeaders(req *http.Request, base, refererPath string) {
 }
 
 func postDingTalk(robot models.DingTalkRobot, content string, atMobiles []string) error {
-	payload := dingTalkMarkdownPayload("警务化扣分通知", content, atMobiles)
+	return postDingTalkMessage(robot, "警务化扣分通知", content, atMobiles)
+}
+
+// postDingTalkMessage is the shared DingTalk markdown sender. Broadcast events
+// reuse it with their own title; atMobiles drives real @ mentions, which also
+// requires the corresponding "@手机号" to stay present in the markdown text.
+func postDingTalkMessage(robot models.DingTalkRobot, title, content string, atMobiles []string) error {
+	payload := dingTalkMarkdownPayload(title, content, atMobiles)
 	client := &http.Client{Timeout: 20 * time.Second}
 	requestURL, err := dingTalkWebhookURL(robot)
 	if err != nil {

@@ -17,28 +17,76 @@ type DeductionRecord struct {
 	StudentID            string   `json:"student_id,omitempty"`
 	Content              string   `json:"content"`
 	Score                float64  `json:"score"`
+	IncludeWeekly        bool     `json:"include_weekly"`
 	SchoolSupervision    bool     `json:"-"`
 }
 
+// CreateDeductionTable creates the regular-deduction table. include_weekly is a
+// numeric flag on the single-deduction record: 0 means the record is excluded
+// from the squadron weekly deduction, any other value means it is included.
 func CreateDeductionTable(db *sql.DB) error {
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS police_style_records_single_subrecords (
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS police_style_records_single_subrecords (
 		id CHAR(32) PRIMARY KEY,
 		submit_date TEXT,
 		student_name VARCHAR(255),
 		content TEXT,
-		score REAL DEFAULT 0.0
-	)`)
+		score REAL DEFAULT 0.0,
+		include_weekly INTEGER NOT NULL DEFAULT 1
+	)`); err != nil {
+		return err
+	}
+	return ensureIncludeWeeklyColumn(db)
+}
+
+// ensureIncludeWeeklyColumn upgrades databases created before include_weekly
+// existed. Existing rows keep counting toward the weekly deduction.
+func ensureIncludeWeeklyColumn(db *sql.DB) error {
+	exists := false
+	rows, err := db.Query(`PRAGMA table_info(police_style_records_single_subrecords)`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "include_weekly" {
+			exists = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if exists {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE police_style_records_single_subrecords ADD COLUMN include_weekly INTEGER NOT NULL DEFAULT 1`)
 	return err
+}
+
+// includeWeeklyValue converts the boolean flag into the stored numeric value
+// (0 = not counted, 1 = counted).
+func includeWeeklyValue(include bool) int {
+	if include {
+		return 1
+	}
+	return 0
 }
 
 func ListDeductionRecords(db *sql.DB) ([]DeductionRecord, error) {
 	rows, err := db.Query(`SELECT r.id, r.submit_date, r.student_name,
 		COALESCE(GROUP_CONCAT(s.stu_name, ', '), ''),
-		COALESCE(GROUP_CONCAT(o.student_id, ','), ''), r.content, r.score
+		COALESCE(GROUP_CONCAT(o.student_id, ','), ''), r.content, r.score, r.include_weekly
 		FROM police_style_records_single_subrecords r
 		LEFT JOIN ownership_single_subrecords o ON o.record_id = r.id
 		LEFT JOIN students s ON s.id = o.student_id
-		GROUP BY r.id, r.submit_date, r.student_name, r.content, r.score
+		GROUP BY r.id, r.submit_date, r.student_name, r.content, r.score, r.include_weekly
 		ORDER BY r.id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("查询扣分记录失败: %w", err)
@@ -48,9 +96,11 @@ func ListDeductionRecords(db *sql.DB) ([]DeductionRecord, error) {
 	for rows.Next() {
 		var r DeductionRecord
 		var studentIDs string
-		if err := rows.Scan(&r.ID, &r.SubmitDate, &r.StudentName, &r.RecognizedStudents, &studentIDs, &r.Content, &r.Score); err != nil {
+		var includeWeekly int
+		if err := rows.Scan(&r.ID, &r.SubmitDate, &r.StudentName, &r.RecognizedStudents, &studentIDs, &r.Content, &r.Score, &includeWeekly); err != nil {
 			return nil, fmt.Errorf("扫描扣分记录失败: %w", err)
 		}
+		r.IncludeWeekly = includeWeekly != 0
 		r.RecognizedStudentIDs = splitStudentIDs(studentIDs)
 		list = append(list, r)
 	}
@@ -101,8 +151,10 @@ func CreateDeductionRecord(db *sql.DB, r DeductionRecord) (*DeductionRecord, err
 		return nil, errors.New("学生姓名不能为空")
 	}
 	r.ID = generateDeductionRecordID(r)
+	// 新建/导入的记录默认计入区队周扣分（与 INSERT 中写死的 1 保持一致）
+	r.IncludeWeekly = true
 	_, err := db.Exec(
-		`INSERT INTO police_style_records_single_subrecords (id, submit_date, student_name, content, score) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO police_style_records_single_subrecords (id, submit_date, student_name, content, score, include_weekly) VALUES (?, ?, ?, ?, ?, 1)`,
 		r.ID, r.SubmitDate, r.StudentName, r.Content, r.Score,
 	)
 	if err != nil {
@@ -121,8 +173,10 @@ func CreateUnassignedDeductionRecord(db *sql.DB, r DeductionRecord) (*DeductionR
 	r.StudentID = ""
 	r.StudentName = strings.TrimSpace(r.StudentName)
 	r.ID = generateDeductionRecordID(r)
+	// 新建/导入的记录默认计入区队周扣分（与 INSERT 中写死的 1 保持一致）
+	r.IncludeWeekly = true
 	_, err := db.Exec(
-		`INSERT INTO police_style_records_single_subrecords (id, submit_date, student_name, content, score) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO police_style_records_single_subrecords (id, submit_date, student_name, content, score, include_weekly) VALUES (?, ?, ?, ?, ?, 1)`,
 		r.ID, r.SubmitDate, r.StudentName, r.Content, r.Score,
 	)
 	if err != nil {
@@ -164,8 +218,10 @@ func CreateDeductionRecordForStudents(db *sql.DB, r DeductionRecord, studentIDs 
 		r.StudentName = strings.Join(studentNames, ", ")
 	}
 	r.ID = generateDeductionRecordID(r)
+	// 新建/导入的记录默认计入区队周扣分（与 INSERT 中写死的 1 保持一致）
+	r.IncludeWeekly = true
 	if _, err := tx.Exec(
-		`INSERT INTO police_style_records_single_subrecords (id, submit_date, student_name, content, score) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO police_style_records_single_subrecords (id, submit_date, student_name, content, score, include_weekly) VALUES (?, ?, ?, ?, ?, 1)`,
 		r.ID, r.SubmitDate, r.StudentName, r.Content, r.Score,
 	); err != nil {
 		return nil, fmt.Errorf("创建扣分记录失败: %w", err)
@@ -213,8 +269,8 @@ func UpdateDeductionRecord(db *sql.DB, id string, r DeductionRecord) error {
 		return errors.New("学生姓名不能为空")
 	}
 	res, err := db.Exec(
-		`UPDATE police_style_records_single_subrecords SET submit_date=?, student_name=?, content=?, score=? WHERE id=?`,
-		r.SubmitDate, r.StudentName, r.Content, r.Score, id,
+		`UPDATE police_style_records_single_subrecords SET submit_date=?, student_name=?, content=?, score=?, include_weekly=? WHERE id=?`,
+		r.SubmitDate, r.StudentName, r.Content, r.Score, includeWeeklyValue(r.IncludeWeekly), id,
 	)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint") {

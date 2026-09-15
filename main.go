@@ -63,6 +63,7 @@ func main() {
 	sessionStore := middleware.NewSessionStore(30 * time.Minute)
 	app := handlers.NewApp(db, sessionStore, filepath.Join(baseDir, "log", "server.log"), filepath.Join(baseDir, "config"))
 	app.StartDailyReportScheduler()
+	app.StartReportEventScheduler()
 
 	staticFS, err := fs.Sub(embeddedStatic, "static")
 	if err != nil {
@@ -90,6 +91,9 @@ func main() {
 	})
 	mux.HandleFunc("GET /daily-report", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, staticFS, "workspace.html")
+	})
+	mux.HandleFunc("GET /report-events", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, staticFS, "report-events.html")
 	})
 	mux.HandleFunc("/", spaHandler(staticFS))
 	mux.HandleFunc("POST /api/login", app.Login)
@@ -125,7 +129,14 @@ func main() {
 	mux.Handle("DELETE /api/daily-report/logs/all", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ClearDailyReportLogs)))
 	mux.Handle("GET /api/daily-report/logs/export", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ExportDailyReportLog)))
 	mux.Handle("POST /api/daily-report/run", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.RunDailyReportNow)))
+	mux.Handle("GET /api/report-events", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ListReportEvents)))
+	mux.Handle("POST /api/report-events", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.CreateReportEvent)))
+	mux.Handle("PUT /api/report-events/{id}", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.UpdateReportEvent)))
+	mux.Handle("DELETE /api/report-events/{id}", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.DeleteReportEvent)))
+	mux.Handle("POST /api/report-events/{id}/test", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.TestReportEvent)))
 	mux.Handle("POST /api/logout", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.Logout)))
+	mux.Handle("GET /api/squad", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.GetSquad)))
+	mux.Handle("PUT /api/squad", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.UpdateSquad)))
 	mux.Handle("GET /api/semesters", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ListSemesters)))
 	mux.Handle("POST /api/semesters", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.CreateSemester)))
 	mux.Handle("GET /api/semesters/{name}", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.GetSemester)))
@@ -348,6 +359,10 @@ func spaHandler(staticFS fs.FS) http.HandlerFunc {
 		}
 		if path == "/daily-management" {
 			http.ServeFileFS(w, r, staticFS, "daily-management.html")
+			return
+		}
+		if path == "/report-events" {
+			http.ServeFileFS(w, r, staticFS, "report-events.html")
 			return
 		}
 		if path == "/favicon.ico" {

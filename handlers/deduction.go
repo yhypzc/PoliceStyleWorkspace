@@ -143,6 +143,22 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// parsedDeductionRow is a workbook row normalized to the fields the
+// regular-deduction tables need, before student recognition.
+type parsedDeductionRow struct {
+	RowNumber         int
+	SubmitDate        string
+	StudentName       string
+	StudentID         string
+	Content           string
+	Score             float64
+	SchoolSupervision bool
+}
+
+// massNoticeTitlePattern matches the daily 信网学院 通报 title, e.g.
+// 「信网学院日警务化管理通报结果（9月7日）」.
+var massNoticeTitlePattern = regexp.MustCompile(`警务化管理通报结果\s*[（(]\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*[）)]`)
+
 // importDeductionWorkbook parses deduction rows from an opened workbook and
 // inserts them into the regular-deduction tables. It returns the imported
 // records and any per-row failures. When skipExisting is true, rows whose
@@ -150,6 +166,9 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 // skipped silently (keeps the daily-report auto-import idempotent).
 // 若某行违规学号为空：先用姓名字段在学生表中查学号，查到则用该学号关联；
 // 姓名也查不到（或无姓名）时，作为"未认定"记录（无学生归属）入库，供后续认定。
+// 除常规导入模板外，同时兼容每日「警务化管理通报结果」表格（见 parseMassNoticeRows）。
+// 扣分类型逐行判定：日期写「月.日」的行是校督扣分（ID 加 xd_ 前缀、负分取绝对值、
+// 走校督申诉模板），其余行是大队督察扣分（见 isSchoolSupervisionDate）。
 func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (imported []models.DeductionRecord, errs []string) {
 	sheetName := f.GetSheetName(0)
 	if sheetName == "" {
@@ -162,11 +181,20 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (impo
 	if len(rows) < 2 {
 		return nil, append(errs, "Excel 文件中没有数据行（除表头外至少需要一行数据）")
 	}
+
+	// 每日「警务化管理通报结果」表格：无学号列，按配置的区队名称过滤后导入
+	if parsed, parseErrs, ok := a.parseMassNoticeRows(rows); ok {
+		return a.persistDeductionRows(parsed, parseErrs, skipExisting)
+	}
+
 	headerRowIndex, dateCol, nameCol, studentIDCol, contentCol, scoreCol := findDeductionHeader(rows)
 	if headerRowIndex < 0 {
 		return nil, append(errs, "表头必须包含「学号」列")
 	}
-	isSchoolSupervision := isSchoolSupervisionWorkbook(rows[headerRowIndex+1:], dateCol)
+	parsed := make([]parsedDeductionRow, 0, len(rows))
+	// 逐行判定扣分类型：日期写「月.日」的是校督扣分，其余（含完整时间戳）是
+	// 大队督察扣分。日期为空的行（表内合并单元格常见）沿用上一行的判定。
+	previousSchoolSupervision := false
 	for i := headerRowIndex + 1; i < len(rows); i++ {
 		row := rows[i]
 		get := func(col int) string {
@@ -174,16 +202,6 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (impo
 				return strings.TrimSpace(row[col])
 			}
 			return ""
-		}
-		date := get(dateCol)
-		if date == "" {
-			// 兼容处理：某行时间字段为空时，自动取当前时间作为该行时间再导入
-			now := time.Now()
-			if isSchoolSupervision {
-				date = fmt.Sprintf("%d.%d", int(now.Month()), now.Day())
-			} else {
-				date = now.Format("2006-01-02 15:04:05")
-			}
 		}
 		name := get(nameCol)
 		studentID := get(studentIDCol)
@@ -198,6 +216,22 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (impo
 		if scoreStr != "" {
 			fmt.Sscanf(scoreStr, "%f", &score)
 		}
+
+		date := get(dateCol)
+		isSchoolSupervision := false
+		if date != "" {
+			isSchoolSupervision = isSchoolSupervisionDate(date)
+			previousSchoolSupervision = isSchoolSupervision
+		} else {
+			isSchoolSupervision = previousSchoolSupervision
+			// 兼容处理：某行时间字段为空时，自动取当前时间作为该行时间再导入
+			now := time.Now()
+			if isSchoolSupervision {
+				date = fmt.Sprintf("%d.%d", int(now.Month()), now.Day())
+			} else {
+				date = now.Format("2006-01-02 15:04:05")
+			}
+		}
 		if isSchoolSupervision {
 			convertedDate, err := schoolSupervisionDate(date)
 			if err != nil {
@@ -210,16 +244,36 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (impo
 			}
 		}
 
-		r := models.DeductionRecord{
+		parsed = append(parsed, parsedDeductionRow{
+			RowNumber:         i + 1,
 			SubmitDate:        date,
 			StudentName:       name,
+			StudentID:         studentID,
 			Content:           content,
 			Score:             score,
 			SchoolSupervision: isSchoolSupervision,
+		})
+	}
+	return a.persistDeductionRows(parsed, errs, skipExisting)
+}
+
+// persistDeductionRows inserts parsed rows. Rows carrying a 学号 use it
+// directly; otherwise the 姓名 column is resolved against the students table,
+// and an unresolvable row is stored as an "未认定" record for later assignment.
+func (a *App) persistDeductionRows(rows []parsedDeductionRow, errs []string, skipExisting bool) ([]models.DeductionRecord, []string) {
+	imported := make([]models.DeductionRecord, 0, len(rows))
+	for _, row := range rows {
+		r := models.DeductionRecord{
+			SubmitDate:        row.SubmitDate,
+			StudentName:       row.StudentName,
+			Content:           row.Content,
+			Score:             row.Score,
+			SchoolSupervision: row.SchoolSupervision,
 		}
 		// 违规学号为空：先用姓名在学生表查学号；查到则改用学号关联
-		if studentID == "" && name != "" {
-			studentID = a.studentIDsForNames(name)
+		studentID := row.StudentID
+		if studentID == "" && row.StudentName != "" {
+			studentID = a.studentIDsForNames(row.StudentName)
 		}
 		if studentID != "" {
 			rec, err := models.CreateDeductionRecordForStudents(a.DB, r, studentID)
@@ -227,24 +281,163 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (impo
 				if skipExisting && isDeductionDuplicateError(err) {
 					continue
 				}
-				errs = append(errs, fmt.Sprintf("第 %d 行: %s", i+1, err.Error()))
+				errs = append(errs, fmt.Sprintf("第 %d 行: %s", row.RowNumber, err.Error()))
 				continue
 			}
 			imported = append(imported, *rec)
 			continue
 		}
-		// 违规学号为空且姓名也查不到（或无姓名）→ 作为"未认定"记录入库
 		rec, err := models.CreateUnassignedDeductionRecord(a.DB, r)
 		if err != nil {
 			if skipExisting && isDeductionDuplicateError(err) {
 				continue
 			}
-			errs = append(errs, fmt.Sprintf("第 %d 行: %s", i+1, err.Error()))
+			errs = append(errs, fmt.Sprintf("第 %d 行: %s", row.RowNumber, err.Error()))
 			continue
 		}
 		imported = append(imported, *rec)
 	}
 	return imported, errs
+}
+
+// parseMassNoticeRows parses the daily 信网学院「警务化管理通报结果」workbook:
+// row 1 carries 「…警务化管理通报结果（M月D日）」, the header row carries
+// 区队/姓名/时间/轻微违纪违规行为/建议扣分, and each following row is one
+// violation. The title supplies the date (current year), the 时间 column
+// (上午/下午) supplies the clock, and only rows whose 区队 equals the configured
+// squadron are returned. ok=false means the workbook is not in this layout.
+func (a *App) parseMassNoticeRows(rows [][]string) ([]parsedDeductionRow, []string, bool) {
+	titleRow, month, day := findMassNoticeTitle(rows)
+	if titleRow < 0 {
+		return nil, nil, false
+	}
+	headerRow, squadCol, nameCol, timeCol, contentCol, scoreCol := findMassNoticeHeader(rows, titleRow)
+	if headerRow < 0 {
+		return nil, []string{"未找到「区队/姓名/轻微违纪违规行为/建议扣分」表头"}, true
+	}
+	squad, err := models.GetSquadName(a.DB)
+	if err != nil {
+		return nil, []string{err.Error()}, true
+	}
+	squad = normalizeExcelHeader(squad)
+	if squad == "" {
+		return nil, []string{"未配置区队名称，请先在「工作台 → 区队」中设置"}, true
+	}
+
+	now := time.Now()
+	datePrefix := fmt.Sprintf("%04d-%02d-%02d", now.Year(), month, day)
+	// 程序判定时间段：当前时刻在 12 点前为上午，否则为下午。
+	currentPeriod := "上午"
+	if now.Hour() >= 12 {
+		currentPeriod = "下午"
+	}
+	currentClock := now.Format("15:04:05")
+
+	parsed := make([]parsedDeductionRow, 0, len(rows))
+	squadSeen := false
+	currentSquad := ""
+	for i := headerRow + 1; i < len(rows); i++ {
+		row := rows[i]
+		get := func(col int) string {
+			if col >= 0 && col < len(row) {
+				return normalizeExcelHeader(row[col])
+			}
+			return ""
+		}
+		// 区队只在每个区队块的首行出现，向后沿用
+		if value := get(squadCol); value != "" {
+			currentSquad = value
+		}
+		if currentSquad == squad {
+			squadSeen = true
+		}
+		name := get(nameCol)
+		content := get(contentCol)
+		if name == "" || content == "" || currentSquad != squad {
+			continue
+		}
+		// 与程序判定时间段一致时取当前时刻，否则上午 08:00:00 / 下午 18:00:00
+		period := get(timeCol)
+		clock := currentClock
+		if period != currentPeriod {
+			switch {
+			case strings.Contains(period, "上午"):
+				clock = "08:00:00"
+			case strings.Contains(period, "下午"):
+				clock = "18:00:00"
+			}
+		}
+		var score float64
+		if scoreStr := get(scoreCol); scoreStr != "" {
+			fmt.Sscanf(scoreStr, "%f", &score)
+		}
+		parsed = append(parsed, parsedDeductionRow{
+			RowNumber:   i + 1,
+			SubmitDate:  datePrefix + " " + clock,
+			StudentName: name,
+			Content:     content,
+			Score:       score,
+		})
+	}
+	errs := make([]string, 0, 1)
+	if !squadSeen {
+		errs = append(errs, fmt.Sprintf("表格中未找到区队 %q 的扣分记录", squad))
+	}
+	return parsed, errs, true
+}
+
+// findMassNoticeTitle locates the 警务化管理通报结果 title in the first rows
+// and returns its row index plus the 月/日 it carries.
+func findMassNoticeTitle(rows [][]string) (rowIndex, month, day int) {
+	limit := len(rows)
+	if limit > 5 {
+		limit = 5
+	}
+	for i := 0; i < limit; i++ {
+		for _, cell := range rows[i] {
+			matches := massNoticeTitlePattern.FindStringSubmatch(cell)
+			if matches == nil {
+				continue
+			}
+			month, _ = strconv.Atoi(matches[1])
+			day, _ = strconv.Atoi(matches[2])
+			if month < 1 || month > 12 || day < 1 || day > 31 {
+				return -1, 0, 0
+			}
+			return i, month, day
+		}
+	}
+	return -1, 0, 0
+}
+
+// findMassNoticeHeader locates the 通报 header row below the title and returns
+// the column index of every field the importer consumes.
+func findMassNoticeHeader(rows [][]string, titleRow int) (headerRow, squadCol, nameCol, timeCol, contentCol, scoreCol int) {
+	limit := titleRow + 6
+	if limit > len(rows) {
+		limit = len(rows)
+	}
+	for i := titleRow; i < limit; i++ {
+		squadCol, nameCol, timeCol, contentCol, scoreCol = -1, -1, -1, -1, -1
+		for colIndex, value := range rows[i] {
+			switch normalizeExcelHeader(value) {
+			case "区队":
+				squadCol = colIndex
+			case "姓名":
+				nameCol = colIndex
+			case "时间":
+				timeCol = colIndex
+			case "轻微违纪违规行为":
+				contentCol = colIndex
+			case "建议扣分":
+				scoreCol = colIndex
+			}
+		}
+		if squadCol >= 0 && nameCol >= 0 && contentCol >= 0 {
+			return i, squadCol, nameCol, timeCol, contentCol, scoreCol
+		}
+	}
+	return -1, -1, -1, -1, -1, -1
 }
 
 func isDeductionDuplicateError(err error) bool {
@@ -254,16 +447,12 @@ func isDeductionDuplicateError(err error) bool {
 
 var monthDayPattern = regexp.MustCompile(`^(\d{1,2})\.(\d{1,2})$`)
 
-func isSchoolSupervisionWorkbook(rows [][]string, dateCol int) bool {
-	if dateCol < 0 {
-		return false
-	}
-	for _, row := range rows {
-		if dateCol < len(row) && strings.TrimSpace(row[dateCol]) == "3.1" {
-			return true
-		}
-	}
-	return false
+// isSchoolSupervisionDate reports whether a 日期 cell is written the way 校督
+// sheets write it: 「月.日」such as 9.7 / 10.12. Regular (大队督察) sheets carry a
+// full `YYYY-MM-DD HH:MM:SS` timestamp, so the date shape alone tells the two
+// apart row by row.
+func isSchoolSupervisionDate(value string) bool {
+	return monthDayPattern.MatchString(strings.TrimSpace(value))
 }
 
 func schoolSupervisionDate(value string) (string, error) {

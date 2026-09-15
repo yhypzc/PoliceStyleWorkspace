@@ -23,7 +23,8 @@ export default defineConfig({
 		'daily-management': resolve(__dirname, 'daily-management.html'),
         students: resolve(__dirname, 'students.html'),
         deductions: resolve(__dirname, 'deductions.html'),
-        'multi-deductions': resolve(__dirname, 'multi-deductions.html')
+        'multi-deductions': resolve(__dirname, 'multi-deductions.html'),
+        'report-events': resolve(__dirname, 'report-events.html')
       }
     }
   }

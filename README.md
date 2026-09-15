@@ -14,9 +14,37 @@
 
 学生信息、学期、寝室、常规扣分记录、寝室整体差记录管理，具备增删改查基本功能。
 
+### 区队名称与每日通报表导入
+
+工作台第一个卡片为「区队」，显示当前区队名称（默认 `24网安二`），点击后在弹窗中修改；名称存放在单列表 `squad(squad_name)` 中，由 `models.CreateSquadTable` 在初始化时建表并写入默认值，接口为 `GET /api/squad` 与 `PUT /api/squad`。
+
+常规扣分记录的「导入 Excel」除导入模板外，还兼容信网学院每日下发的《警务化管理扣分表》（`.data/` 下样例），识别逻辑见 `handlers/deduction.go:parseMassNoticeRows`：
+
+- 表首标题形如「信网学院日警务化管理通报结果（9月7日）」，取其中 `a月b日` 与当前年份拼成 `YYYY-MM-DD`。
+- 表头为 `序号 | 区队 | 姓名 | 时间 | 轻微违纪违规行为 | 建议扣分 | 总扣分`；`姓名`→记录姓名（按姓名智能匹配认定学生），`轻微违纪违规行为`→扣分项目，`建议扣分`→分数。
+- 只导入 `区队` 与已配置区队名称一致的行（区队名只在每个区队块的首行出现，会向后沿用）；表格中没有该区队时给出提示。
+- `时间` 列（上午/下午）与程序按当前时刻判定的时间段比较：一致时 `hh:mm:ss` 取当前时刻，不一致时上午记 `08:00:00`、下午记 `18:00:00`。
+- 记录按常规（大队督察）规则生成 ID，不做校督转换（校督扣分请用导入模板，类型逐行判定，见「常规扣分导入的校督／大队督察判定」）。
+
+### 常规扣分导入的校督／大队督察判定
+
+「导入 Excel」使用 `handlers/embedded/deduction_template.xlsx`，表头为 `日期 | 姓名 | 扣分项目 | 分数 | 违规学号`（`学号` 或 `违规学号` 列必需）。扣分类型**逐行判定**，依据是该行「日期」的写法，见 `handlers/deduction.go:isSchoolSupervisionDate`：
+
+- 该行日期写成「月.日」（如 `9.7`、`10.12`，正则 `^\d{1,2}\.\d{1,2}$`）→ **校督扣分**：`schoolSupervisionDate` 补当前年份成 `YYYY-MM-DD 00:00:00`，负分取绝对值，记录 ID 加 `xd_` 前缀。
+- 其余写法（完整时间戳 `YYYY-MM-DD HH:MM:SS` 等）→ **大队督察扣分**：日期原样入库，分数保留符号，ID 为纯 md5。
+
+补充规则：
+
+- 同一张表允许校督行与大队督察行**混排**，互不影响。
+- 日期为空的行沿用**上一行**的判定类型，再按该类型补当前时间（兼容表内合并单元格）；日期列整体缺失时全部按大队督察处理。
+- 前端申诉窗口按记录 ID 前缀判断类型：`row.id.startsWith('xd_')` → 校督申诉模板（导出分类 `校督`），否则大队督察申诉模板（导出分类 `大队督察`）。因此记录 ID 前缀与逐行判定必须成对使用。
+- 每日「警务化管理通报结果」表格走 `parseMassNoticeRows` 分支，永远按常规（大队督察）入库，不做校督转换。
+
 ### 每周扣分展示与导出
 
 日常综合管理按周次展示每日分数，支持导出。
+
+「本周扣分条目汇总」按常规扣分/寝室整体差分区列出该周全部记录：常规扣分可直接编辑、删除，寝室整体差可编辑、删除并进入子项管理；改动后自动刷新周详情与条目列表。
 
 学期总表动态统计，支持导出。
 
@@ -46,13 +74,16 @@
 
 日常综合管理分数计算在 `fillDailyScores`：
 
-- 常规扣分：一条记录如果认定了 N 名学生，每名学生承担 `record.score / N`。
-
-- 寝室整体差：一条主记录如果有 M 个子项，某子项分配给 N 名学生，则该子项每名学生承担 `record.score / M / N`。
+- 常规扣分：一条记录如果认定了 N 名学生，每名学生承担 `record.score / N`。分摊前先检查该记录的"是否计入区队周扣分"（`include_weekly`）：为 `0`（不计入）时整条记录跳过，不参与任何周统计。
+- 寝室整体差：一条主记录如果有 M 个子项，某子项分配给 N 名学生，则该子项每名学生承担 `record.score / M / N`。寝室整体差恒为计入。
 
 - 周统计按日期聚合到 `student_id + day`；学期汇总再按周累加，最终按总扣分降序展示。
 
-- 导出明细使用同一分摊逻辑，代码见 `fillDailyExportDetails`。
+- 学期汇总（`DailyManagementSummary` / `ExportDailyManagementSummary`）忽略"是否计入区队周扣分"这一选项，统计全部记录；只有周维度（周详情、周导出、周报）才排除不计入的记录。
+
+- 导出明细使用同一分摊逻辑，代码见 `fillDailyExportDetails`。周导出的 sheet2 明细/学期汇总的"扣分记录"表照常列出该周全部记录（含寝室整体差子项），并带一列"是否计入区队周扣分"（是/否，寝室整体差恒为是）。
+
+- 惩戒名单统计（`computePunishmentEntries`）同样在分摊前排除不计入的常规扣分记录。
 
 ### **惩戒名单统计**
 
@@ -100,6 +131,26 @@
 - 若播报配置开启自动入库（`daily_report_config.auto_import`），日志入库后会把当批抓取记录自动导入常规扣分表：复用"导出制表→导入解析"逻辑；申诉成功(`state=4`)与已删除(`state=7`)的记录被过滤，`violation_ids` 为空的整区/包干区记录按未指定条目导入。
 
 - 播报日志导出 XLSX 的"违规学号"列会按"姓名→学号"自动填充（仅留能匹配到本地学生的），文件可直接回导。
+
+### **定时通知管理**
+
+定时通知用于按计划时间把一条自定义钉钉消息（如包干区打扫提醒）发送到指定机器人，页面入口为 `/report-events`，代码见 `models/report_event.go`、`handlers/report_event.go` 与 `handlers/report_event_scheduler.go`。界面文案统一使用「定时通知」，仅数据库表名与接口路径保留 `report_event` 前缀。
+
+- 表格字段为通知 ID、计划播报时间、播报状态、预计发布内容、发送的机器人、日志、操作；右上角「新增定时通知」以与编辑相同的表单插入。
+
+- 计划播报时间由日历表（`ElDatePicker`）与时刻表（`ElTimePicker`）拼成 `YYYY-MM-DD HH:MM:SS` 落库。
+
+- `status` 为 `0` 表示还未播报、`1` 表示播报成功、`2` 表示播报失败，前端按状态显示标签，并据此把操作列的按钮在「测试」与「重试」之间切换。
+
+- 操作列提供「编辑」（改时间、改内容、改机器人，保存后重置为未播报并清空日志）、「测试／重试」（立即发送并写入日志，失败时按钮显示「重试」）与「删除」。
+
+- `StartReportEventScheduler` 每 15 秒扫描一次到期且未播报的通知并发送；发送串行执行，发送后立即写状态，因此重启不会重复发送。**服务停机期间错过的通知不做自动补播**：超过 10 分钟宽限窗后直接标记为「播报失败」并在日志写入原因，由人工点「重试」补发。
+
+- 发送对象取自 `report_event_to_robots`，**忽略机器人自身的「启用/禁用」开关**——该开关只约束周报，因此被禁用的机器人同样会收到定时通知。
+
+- 正文换行：内容按普通换行（`\n`）入库，前端表格用 `white-space: pre-wrap` 原样展示为相邻两行；发送时由 `handlers/report_event.go:markdownLineBreaks` 把每一行展开为独立段落（空行分隔）。钉钉 markdown 会丢掉单个 `\n`，只有空行才是真换行（[钉钉开发者社区](https://developer.aliyun.com/ask/515046)）。
+
+- `@` 功能：编辑播报内容时输入 `@` 会弹出同学姓名下拉（`ElMention`，选项为「姓名（手机号）」），选中后插入 `@手机号`，支持 @ 多人。发送时 `handlers/report_event.go:reportEventAtMobiles` 从正文里提取 `@手机号`，并把 `@姓名` 也按 `students.phone_number` 解析成手机号，最终以钉钉 `markdown` 消息的 `at.atMobiles` 字段真实 @ 到人（正文必须保留 `@手机号`，钉钉才会渲染成 @）。
 
 ### **警务化管理周报**
 
@@ -175,9 +226,9 @@ API 鉴权：
 |---|---|---|---|
 |`user`|`username`|`username`, `password`, `salt`|管理员账号。密码为双 SHA\-256 加盐摘要，见 `models/user.go:HashPassword`。|
 |`semester`|`semester_name`|`semester_name`, `start_time`, `end_time`|学期范围。日期字段使用 `YYYY-MM-DD` 文本。|
-|`students`|`id`|`id`, `stu_name`|学生基础信息。|
+|`students`|`id`|`id`, `stu_name`, `phone_number`|学生基础信息。`phone_number` 可为空，用于定时通知 @ 学生；新增/编辑学生与 Excel 导入（可选「手机号」列）均可维护。|
 |`dorm`|`dorm_name`|`dorm_name`, `seq`, `phone_number`|寝室管理。`phone_number` 可为空，用于钉钉 @。|
-|`police_style_records_single_subrecords`|`id`|`id`, `submit_date`, `student_name`, `content`, `score`|常规扣分记录。|
+|`police_style_records_single_subrecords`|`id`|`id`, `submit_date`, `student_name`, `content`, `score`, `include_weekly`|常规扣分记录。`include_weekly` 为数字：`0` 表示不计入区队周扣分，非 `0`（默认 `1`）表示计入。|
 |`ownership_single_subrecords`|`(record_id, student_id)`|`record_id`, `student_id`|常规扣分记录与学生的认定关系。|
 |`police_style_records_multi_subrecords`|`id`|`id`, `submit_date`, `dorm_name`, `content`, `score`|寝室整体差扣分主记录。|
 |`subrecords_for_police_style_records_multi_subrecords`|`id`|`id`, `belongs_to`, `content`|寝室整体差子项。|
@@ -187,8 +238,15 @@ API 鉴权：
 |`daily_report_cache`|`id`|`id`, `response_raw`|播报抓取原始响应缓存。|
 |`daily_report_log`|`(robot_name, op_time)`|`op_time`, `op_status`, `fetch_content`, `robot_name`, `raw_id`|播报日志，`raw_id` 指向原始响应缓存。|
 |`daily_report_auto_run`|`run_key`|`run_key`, `op_time`|自动播报防重复执行记录。|
+|`report_events`|`id`|`id`, `scheduled_time`, `status`, `content`, `logs`|定时通知。`status` 为 `0` 未播报／`1` 播报成功／`2` 播报失败；`content` 为播报内容（可含 `@手机号`），`logs` 逐行追加发送结果。|
+|`report_event_to_robots`|`(report_id, report_robot_id)`|`report_id`, `report_robot_id`|定时通知与钉钉机器人的多对多关系，`report_id` 外键指向 `report_events(id)`，`report_robot_id` 外键指向 `dingtalk_webbook_robots(robot_name)`。|
+|`squad`|`squad_name`|`squad_name`|当前区队名称（单列单行，默认 `24网安二`），用于每日通报表导入时过滤本区队记录。|
 
 ```SQL
+CREATE TABLE squad (
+        squad_name TEXT PRIMARY KEY
+);
+
 CREATE TABLE user (
         username TEXT PRIMARY KEY,
         password CHAR(32) NOT NULL,
@@ -203,7 +261,8 @@ CREATE TABLE semester (
 
 CREATE TABLE students (
         id CHAR(6) PRIMARY KEY,
-        stu_name VARCHAR(10) NOT NULL
+        stu_name VARCHAR(10) NOT NULL,
+        phone_number TEXT
 );
 
 CREATE TABLE dorm (
@@ -216,7 +275,8 @@ CREATE TABLE police_style_records_single_subrecords (
         submit_date TEXT,
         student_name VARCHAR(255),
         content TEXT,
-        score REAL DEFAULT 0.0
+        score REAL DEFAULT 0.0,
+        include_weekly INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE ownership_single_subrecords (
         record_id CHAR(32),
@@ -289,6 +349,22 @@ CREATE TABLE daily_report_log(
     PRIMARY KEY(robot_name,op_time),
     FOREIGN KEY(robot_name) REFERENCES dingtalk_webbook_robots(robot_name),
     FOREIGN KEY(raw_id) REFERENCES daily_report_cache(id)
+);
+
+CREATE TABLE report_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scheduled_time TEXT,
+    status INT NOT NULL DEFAULT 0,
+    content TEXT,
+    logs TEXT
+);
+
+CREATE TABLE report_event_to_robots (
+    report_id INTEGER,
+    report_robot_id TEXT,
+    PRIMARY KEY (report_id, report_robot_id),
+    FOREIGN KEY (report_id) REFERENCES report_events(id) ON DELETE CASCADE,
+    FOREIGN KEY (report_robot_id) REFERENCES dingtalk_webbook_robots(robot_name)
 );
 ```
 

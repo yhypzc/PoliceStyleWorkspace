@@ -104,6 +104,14 @@ body { color: #20242c; background: var(--default-bg-color); font-family: Inter, 
 @media (max-width: 1100px) { .workspace-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .workspace-stat-grid { grid-template-columns: 1fr; }.workspace-heading h1 { font-size: 26px; } }
 
+/* ── Broadcast events ── */
+.report-events-page-content { width: 100%; height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.report-events-table-wrap { flex: 1 1 auto; width: 100%; min-height: 0; overflow: auto; }
+.report-events-table-wrap .el-table { min-width: 100%; }
+.report-events-hint { margin: -6px 0 14px; color: #7b8492; font-size: 13px; }
+.report-event-content { display: block; white-space: pre-wrap; word-break: break-word; }
+.report-event-logs { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; word-break: break-word; color: #657084; font-size: 13px; }
+
 /* ── Collapse cards ── */
 .collapse-title { font-weight: 600; font-size: 15px; }
 .collapse-date { margin-left: 16px; font-size: 13px; color: var(--art-gray-700); }

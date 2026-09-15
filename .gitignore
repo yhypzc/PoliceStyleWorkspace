@@ -8,3 +8,9 @@ web/node_modules/
 handlers/appeal_path_test.go
 installer
 installer/*
+
+# 数据材料（本地业务数据，不入库）
+/*.xlsx
+/*.xls
+/*.csv
+/.tmp*

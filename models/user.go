@@ -60,6 +60,12 @@ func Init(dbPath string) (*sql.DB, string, error) {
 	if err := CreateDailyReportTables(db); err != nil {
 		return nil, "", err
 	}
+	if err := CreateReportEventTables(db); err != nil {
+		return nil, "", err
+	}
+	if err := CreateSquadTable(db); err != nil {
+		return nil, "", err
+	}
 
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM user WHERE username = ?`, adminUser).Scan(&count); err != nil {

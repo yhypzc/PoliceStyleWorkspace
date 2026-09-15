@@ -87,7 +87,7 @@ func (a *App) computePunishmentEntries(weekStart, weekEnd time.Time, threshold f
 			(SELECT COUNT(*) FROM ownership_single_subrecords WHERE record_id = r.id) AS student_count
 		FROM police_style_records_single_subrecords r
 		JOIN ownership_single_subrecords o ON o.record_id = r.id
-		WHERE r.submit_date >= ? AND r.submit_date < ?
+		WHERE r.submit_date >= ? AND r.submit_date < ? AND r.include_weekly <> 0
 		ORDER BY r.id`, weekStart.Format("2006-01-02 15:04:05"), weekEnd.Format("2006-01-02 15:04:05"))
 	if err != nil {
 		return nil, fmt.Errorf("查询常规扣分记录失败: %w", err)
