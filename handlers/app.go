@@ -75,9 +75,9 @@ func (a *App) Login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	middleware.SetCookie(w, sessionID, 30*time.Minute)
+	middleware.SetCookie(w, sessionID, a.Sessions.TTL())
 	success = true
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": models.User{Username: req.Username}, "csrf_token": csrfToken})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "user": models.User{Username: req.Username}, "csrf_token": csrfToken, "idle_timeout_seconds": int(a.Sessions.TTL().Seconds())})
 }
 
 func (a *App) ChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -104,7 +104,25 @@ func (a *App) ChangePassword(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) CheckAuth(w http.ResponseWriter, r *http.Request) {
 	session, _ := a.Sessions.Get(r)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "authenticated": true, "username": session.Username})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                   true,
+		"authenticated":        true,
+		"username":             session.Username,
+		"idle_timeout_seconds": int(a.Sessions.TTL().Seconds()),
+		"idle_remaining_seconds": int(a.Sessions.Remaining(r).Seconds()),
+	})
+}
+
+// TouchSession refreshes the idle deadline. The frontend calls it when the user
+// actually interacts with the page (mouse/keyboard/scroll), so that background
+// polling like /api/clock cannot keep an untouched tab signed in.
+func (a *App) TouchSession(w http.ResponseWriter, r *http.Request) {
+	session, _ := a.Sessions.Get(r)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                   true,
+		"username":             session.Username,
+		"idle_timeout_seconds": int(a.Sessions.TTL().Seconds()),
+	})
 }
 
 func (a *App) Logout(w http.ResponseWriter, r *http.Request) {

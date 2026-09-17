@@ -14,6 +14,11 @@
 
 学生信息、学期、寝室、常规扣分记录、寝室整体差记录管理，具备增删改查基本功能。
 
+常规扣分记录管理与寝室整体差扣分记录管理右上角均有「添加项目」按钮，用手工录入一条记录，不必走 Excel：
+
+- 常规扣分「添加项目」：姓名、日期（日历 + 时刻表，默认打开时取当前日期与时刻）、认定（在学生列表中多选，可搜学号/姓名）、扣分内容、分数、是否计入区队周扣分、扣分类型（大队督察扣分／校督扣分）。`姓名` 留空时按「认定」的学生姓名自动拼接；姓名与认定至少要有一个。扣分类型选校督时记录 ID 加 `xd_` 前缀，申诉导出即走校督模板。提交到 `POST /api/deductions`，入库与认定关联在同一事务内完成（`models.CreateDeductionRecordWithOwnership`）。
+- 寝室整体差「添加项目」：日期、寝室名称、扣分项目、分数。日期按天存为 `YYYY-MM-DD 00:00:00`，与 Excel 导入保持一致；分数不可为负。提交到 `POST /api/multi-deductions`（`models.CreateMultiDeductionRecord`）。
+
 ### 区队名称与每日通报表导入
 
 工作台第一个卡片为「区队」，显示当前区队名称（默认 `24网安二`），点击后在弹窗中修改；名称存放在单列表 `squad(squad_name)` 中，由 `models.CreateSquadTable` 在初始化时建表并写入默认值，接口为 `GET /api/squad` 与 `PUT /api/squad`。
@@ -193,6 +198,20 @@ API 鉴权：
 - 前端 `web/src/api.ts` 会从 `PSW_CSRF_TOKEN` Cookie 中读取 token，并自动为非 GET 请求设置 `X-CSRF-Token`。
 
 - 未认证请求返回 `401`，CSRF 校验失败返回 `403`。
+
+### 会话空闲超时
+
+会话寿命是**空闲 10 分钟**（`main.go:sessionIdleTimeout`），不是登录后固定 10 分钟——只有用户真的在操作，截止时间才往后推：
+
+- 服务端滑动续期：`middleware.RequireAuth` 在校验通过后把 `ExpiresAt` 重置为「现在 + 10 分钟」，并同步重发 Cookie（`Set-Cookie`），否则浏览器会先丢掉 Cookie 而服务端会话还活着。会话表里的过期项由 `cleanLoop` 每分钟清理。
+
+- 后台轮询不算活跃：`GET /api/clock`（前端每 60 秒对时）走的是 `middleware.RequireAuthPassive`，只校验不续期，所以「页面开着但没人动」照样会到点掉线。
+
+- 前端心跳：`App.vue` 监听 `mousedown`/`mousemove`/`keydown`/`wheel`/`touchstart`（5 秒节流），确有操作时最多每分钟调用一次 `POST /api/session/touch` 续期——避免「一直在页面上操作却没有发请求」被误判为空闲。
+
+- 前端兜底：本地同时跑一个 10 分钟空闲计时器（初值取自 `/api/check-auth` 的 `idle_timeout_seconds`），到点直接提示并跳回登录页，不必等下一个请求返回 401。
+
+- `GET /api/check-auth` 会返回 `idle_timeout_seconds` 与 `idle_remaining_seconds`，前端据此对齐自己的计时器。
 
 ## **安全性**
 

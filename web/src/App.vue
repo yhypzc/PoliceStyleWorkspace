@@ -287,6 +287,66 @@ let clockSyncTimer: ReturnType<typeof setInterval> | undefined
 let serverClockOffset = 0
 const currentTimeText = computed(() => currentTime.value.toLocaleString('zh-CN', { hour12: false }))
 
+// ── 会话空闲计时 ──
+// 会话寿命是「浏览器发呆 10 分钟」，不是登录后固定 10 分钟：真实操作会把截止时间往后
+// 推（服务端 RequireAuth 滑动续期），而 /api/clock 这类后台轮询不续期，所以挂着不动的
+// 页面到点仍会掉线。这里同时做本地兜底：发呆到点直接回登录页，不用等下一个请求 401。
+let sessionIdleMs = 10 * 60 * 1000
+let lastActivityAt = Date.now()
+let lastTouchAt = 0
+let idleTimer: ReturnType<typeof setTimeout> | undefined
+const ACTIVITY_EVENTS = ['mousedown', 'mousemove', 'keydown', 'wheel', 'touchstart'] as const
+
+function scheduleIdleLogout() {
+  if (idleTimer) clearTimeout(idleTimer)
+  idleTimer = setTimeout(() => {
+    if (Date.now() - lastActivityAt < sessionIdleMs) { scheduleIdleLogout(); return }
+    expireSession()
+  }, sessionIdleMs)
+}
+
+function expireSession() {
+  stopSessionWatch()
+  clearCSRFToken()
+  ElMessage.warning('长时间未操作，已自动退出，请重新登录')
+  window.setTimeout(() => location.replace('/login'), 800)
+}
+
+function markSessionActivity() {
+  const now = Date.now()
+  // 高频事件（mousemove）节流：5 秒内只记一次活跃
+  if (now - lastActivityAt < 5_000) return
+  lastActivityAt = now
+  scheduleIdleLogout()
+  // 心跳最多每分钟一次；它本身也是带认证的请求，会刷新服务端会话
+  if (now - lastTouchAt > 60_000) {
+    lastTouchAt = now
+    void api('/api/session/touch', { method: 'POST' }).catch(() => { /* 401 时 api() 会跳登录页 */ })
+  }
+}
+
+function startSessionWatch() {
+  lastActivityAt = Date.now()
+  lastTouchAt = Date.now()
+  ACTIVITY_EVENTS.forEach((name) => window.addEventListener(name, markSessionActivity, { passive: true }))
+  scheduleIdleLogout()
+}
+
+function stopSessionWatch() {
+  ACTIVITY_EVENTS.forEach((name) => window.removeEventListener(name, markSessionActivity))
+  if (idleTimer) clearTimeout(idleTimer)
+  idleTimer = undefined
+}
+
+function currentDateParts() {
+  const now = new Date(Date.now() + serverClockOffset)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return {
+    date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    clock: `${pad(now.getHours())}:${pad(now.getMinutes())}`
+  }
+}
+
 // ── Dorm state & actions ──
 type Dorm = { dorm_name: string; seq: number; phone_number: string }
 const dorms = ref<Dorm[]>([])
@@ -320,6 +380,19 @@ const editingDeduction = ref<{ id: string; submit_date: string; student_name: st
 const editingRecognition = ref<Deduction | null>(null)
 const recognizedStudentIDs = ref<string[]>([])
 const deductionEditForm = reactive({ id: '', submit_date: '', student_name: '', content: '', score: '', include_weekly: true })
+// 「添加项目」表单：姓名、日期（日历+时刻表）、认定学生、扣分内容、分数、
+// 是否计入区队周扣分、扣分类型
+const deductionCreateVisible = ref(false)
+const deductionCreateForm = reactive({
+  student_name: '',
+  date: '',
+  clock: '',
+  content: '',
+  score: 0,
+  include_weekly: true,
+  school_supervision: false,
+  recognized_student_ids: [] as string[]
+})
 const deductionImportResult = ref<{ imported: number; errors?: string[] } | null>(null)
 const importResult = ref<{ imported: number; errors?: string[] } | null>(null)
 type MultiDeduction = { id: string; submit_date: string; dorm_name: string; content: string; score: number }
@@ -333,6 +406,9 @@ const multiBatchDeleteSelection = ref<string[]>([])
 const multiBatchDeleteFilters = reactive({ universalEnabled: false, universal: '', fieldEnabled: false, fields: [{ field: 'id', value: '' }], dateEnabled: false, dateRange: [] as string[] })
 const editingMultiDeduction = ref<MultiDeduction | null>(null)
 const multiDeductionForm = reactive({ submit_date: '', dorm_name: '', content: '', score: 0 })
+// 寝室整体差的「添加项目」表单：日期、寝室名称、扣分项目、分数
+const multiDeductionCreateVisible = ref(false)
+const multiDeductionCreateForm = reactive({ date: '', dorm_name: '', content: '', score: 0 })
 const managingSubrecords = ref<MultiDeduction | null>(null)
 const multiSubrecords = ref<MultiSubrecord[]>([])
 const multiSubrecordForm = reactive({ id: '', content: '', student_ids: [] as string[] })
@@ -415,8 +491,12 @@ const multiBatchDeleteCandidates = computed(() => {
 
 onMounted(async () => {
   if (page.value === 'login') { authReady.value = true; return }
-  try { await api('/api/check-auth') } catch { /* api() performs the redirect. */ return }
+  try {
+    const auth = await api<{ idle_timeout_seconds?: number }>('/api/check-auth')
+    if (auth.idle_timeout_seconds && auth.idle_timeout_seconds > 0) sessionIdleMs = auth.idle_timeout_seconds * 1000
+  } catch { /* api() performs the redirect. */ return }
   authReady.value = true
+  startSessionWatch()
   clockTimer = setInterval(() => { currentTime.value = new Date(Date.now() + serverClockOffset) }, 1000)
   if (await syncServerClock()) clockSyncTimer = setInterval(() => { void syncServerClock() }, 60_000)
   if (page.value === 'workspace') await loadWorkspaceStats()
@@ -426,6 +506,7 @@ onMounted(async () => {
   if (page.value === 'report-events') await loadReportEventPage()
   if (page.value === 'dorms') await loadDorms()
   if (page.value === 'students') await loadStudents()
+  if (page.value === 'deductions') await loadStudents()
   if (page.value === 'deductions') await loadDeductions()
   if (page.value === 'multi-deductions') await loadMultiDeductions()
 })
@@ -437,6 +518,7 @@ function refreshStudentsWhenPageShown() {
 onMounted(() => window.addEventListener('pageshow', refreshStudentsWhenPageShown))
 onBeforeUnmount(() => {
   window.removeEventListener('pageshow', refreshStudentsWhenPageShown)
+  stopSessionWatch()
   if (clockTimer) clearInterval(clockTimer)
   if (clockSyncTimer) clearInterval(clockSyncTimer)
 })
@@ -461,6 +543,7 @@ watch(page, (newPage) => {
   if (newPage === 'report-events') loadReportEventPage()
   if (newPage === 'dorms') loadDorms()
   if (newPage === 'students') loadStudents()
+  if (newPage === 'deductions') loadStudents()
   if (newPage === 'deductions') loadDeductions()
   if (newPage === 'multi-deductions') loadMultiDeductions()
 })
@@ -1163,6 +1246,42 @@ async function submitEditDeduction() {
   } catch (error: any) { ElMessage.error(error.message) }
   finally { deductionBusy.value = false }
 }
+function openCreateDeduction() {
+  const { date, clock } = currentDateParts()
+  deductionCreateForm.student_name = ''
+  deductionCreateForm.date = date
+  deductionCreateForm.clock = clock
+  deductionCreateForm.content = ''
+  deductionCreateForm.score = 0
+  deductionCreateForm.include_weekly = true
+  deductionCreateForm.school_supervision = false
+  deductionCreateForm.recognized_student_ids = []
+  deductionCreateVisible.value = true
+}
+async function submitCreateDeduction() {
+  if (!deductionCreateForm.date || !deductionCreateForm.clock) return ElMessage.warning('请选择日期和时刻')
+  if (!deductionCreateForm.student_name.trim() && !deductionCreateForm.recognized_student_ids.length) return ElMessage.warning('请填写姓名或选择认定学生')
+  deductionBusy.value = true
+  try {
+    await api('/api/deductions', {
+      method: 'POST',
+      body: JSON.stringify({
+        submit_date: `${deductionCreateForm.date} ${deductionCreateForm.clock}:00`,
+        student_name: deductionCreateForm.student_name,
+        content: deductionCreateForm.content,
+        score: Number(deductionCreateForm.score || 0),
+        include_weekly: deductionCreateForm.include_weekly,
+        school_supervision: deductionCreateForm.school_supervision,
+        recognized_student_ids: deductionCreateForm.recognized_student_ids
+      })
+    })
+    ElMessage.success('记录已添加')
+    deductionCreateVisible.value = false
+    await loadDeductions()
+    await refreshWeekViewIfOpen()
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { deductionBusy.value = false }
+}
 async function deleteDeduction(r: { id: string | number }) {
   try {
     await ElMessageBox.confirm(`确定要删除记录 "${r.id}" 吗？`, '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
@@ -1250,6 +1369,35 @@ function removeMultiBatchField(index: number) { if (multiBatchDeleteFilters.fiel
 function toggleMultiBatchSelection(checked: boolean) { multiBatchDeleteSelection.value = checked ? multiBatchDeleteCandidates.value.map((record) => record.id) : [] }
 async function submitMultiBatchDelete() { if (!multiBatchDeleteSelection.value.length) return ElMessage.warning('请选择要删除的记录'); selectedMultiDeductionIDs.value = [...multiBatchDeleteSelection.value]; await deleteSelectedMultiDeductions(); if (!selectedMultiDeductionIDs.value.length) multiBatchDeleteVisible.value = false }
 async function deleteSelectedMultiDeductions() { if (!selectedMultiDeductionIDs.value.length) return ElMessage.warning('请选择要删除的记录'); try { await ElMessageBox.confirm(`确定删除选中的 ${selectedMultiDeductionIDs.value.length} 条寝室整体差记录吗？子项也会一并删除。`, '确认批量删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }) } catch { return }; multiDeductionBusy.value = true; try { const result = await api<{ deleted: number }>('/api/multi-deductions/batch-delete', { method: 'POST', body: JSON.stringify({ ids: selectedMultiDeductionIDs.value }) }); selectedMultiDeductionIDs.value = []; await loadMultiDeductions(); ElMessage.success(`已删除 ${result.deleted} 条记录`) } catch (error: any) { ElMessage.error(error.message) } finally { multiDeductionBusy.value = false } }
+function openCreateMultiDeduction() {
+  multiDeductionCreateForm.date = currentDateParts().date
+  multiDeductionCreateForm.dorm_name = ''
+  multiDeductionCreateForm.content = ''
+  multiDeductionCreateForm.score = 0
+  multiDeductionCreateVisible.value = true
+}
+async function submitCreateMultiDeduction() {
+  if (!multiDeductionCreateForm.date) return ElMessage.warning('请选择日期')
+  if (!multiDeductionCreateForm.dorm_name.trim()) return ElMessage.warning('请填写寝室名称')
+  if (!multiDeductionCreateForm.content.trim()) return ElMessage.warning('请填写扣分项目')
+  multiDeductionBusy.value = true
+  try {
+    await api('/api/multi-deductions', {
+      method: 'POST',
+      body: JSON.stringify({
+        submit_date: `${multiDeductionCreateForm.date} 00:00:00`,
+        dorm_name: multiDeductionCreateForm.dorm_name,
+        content: multiDeductionCreateForm.content,
+        score: Number(multiDeductionCreateForm.score || 0)
+      })
+    })
+    ElMessage.success('记录已添加')
+    multiDeductionCreateVisible.value = false
+    await loadMultiDeductions()
+    await refreshWeekViewIfOpen()
+  } catch (error: any) { ElMessage.error(error.message) }
+  finally { multiDeductionBusy.value = false }
+}
 async function deleteMultiDeduction(record: MultiDeduction) {
   try { await ElMessageBox.confirm(`确定删除寝室 "${record.dorm_name}" 的这条记录吗？子项也会一并删除。`, '确认删除', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }) } catch { return }
   multiDeductionBusy.value = true
@@ -1801,6 +1949,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             <h2 class="semester-title">寝室整体差扣分记录管理</h2>
             <div style="display:flex;gap:10px">
               <ElInput v-model="multiDeductionSearch" clearable placeholder="搜索 ID、日期、寝室、项目或分数" style="width:270px" />
+              <ElButton type="primary" class="custom-height" @click="openCreateMultiDeduction">添加项目</ElButton>
               <ElButton type="primary" class="custom-height" @click="downloadMultiDeductionTemplate">模板下载</ElButton>
               <ElUpload :show-file-list="false" :before-upload="(file) => { importMultiDeductions(file); return false }" accept=".xlsx">
                 <ElButton type="success" class="custom-height" :loading="multiDeductionBusy">导入 Excel</ElButton>
@@ -1818,6 +1967,26 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElTableColumn label="操作" width="400"><template #default="{ row }"><ElButton type="primary" text @click="startEditMultiDeduction(row)">编辑</ElButton><ElButton type="primary" text @click="openAppeal(row)">导出申诉模板</ElButton><ElButton type="primary" text @click="openSubrecords(row)">子项管理</ElButton><ElButton type="danger" text @click="deleteMultiDeduction(row)">删除</ElButton></template></ElTableColumn>
             </ElTable>
           </div>
+          <ElDialog v-model="multiDeductionCreateVisible" title="添加项目" width="560px">
+            <ElForm label-position="top" @submit.prevent="submitCreateMultiDeduction">
+              <ElFormItem label="日期">
+                <ElDatePicker v-model="multiDeductionCreateForm.date" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" />
+              </ElFormItem>
+              <ElFormItem label="寝室名称">
+                <ElInput v-model.trim="multiDeductionCreateForm.dorm_name" placeholder="如：14#520" />
+              </ElFormItem>
+              <ElFormItem label="扣分项目">
+                <ElInput v-model="multiDeductionCreateForm.content" type="textarea" :rows="2" placeholder="请填写扣分项目" />
+              </ElFormItem>
+              <ElFormItem label="分数">
+                <ElInputNumber v-model="multiDeductionCreateForm.score" :min="0" :step="0.1" :precision="2" style="width:100%" />
+              </ElFormItem>
+              <div style="display:flex;gap:10px;justify-content:flex-end;">
+                <ElButton @click="multiDeductionCreateVisible = false">取消</ElButton>
+                <ElButton type="primary" native-type="submit" :loading="multiDeductionBusy">保存</ElButton>
+              </div>
+            </ElForm>
+          </ElDialog>
           <ElDialog v-model="multiBatchDeleteVisible" title="批量删除寝室整体差记录" width="760px">
             <ElForm label-position="top">
               <ElFormItem><ElCheckbox v-model="multiBatchDeleteFilters.universalEnabled">字段包含</ElCheckbox><ElInput v-model="multiBatchDeleteFilters.universal" :disabled="!multiBatchDeleteFilters.universalEnabled" placeholder="搜索 ID、日期、寝室、项目或分数" style="margin-top:8px" /></ElFormItem>
@@ -1836,6 +2005,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             <h2 class="semester-title">常规扣分记录管理</h2>
             <div style="display:flex;gap:10px;align-items:center;">
               <ElInput v-model="deductionSearch" clearable placeholder="搜索记录 ID、姓名、认定、日期、内容或分数" style="width:400px" />
+              <ElButton type="primary" class="custom-height" @click="openCreateDeduction">添加项目</ElButton>
               <ElButton type="primary" class="custom-height" @click="downloadDeductionTemplate">模板下载</ElButton>
               <ElUpload :show-file-list="false" :before-upload="(f) => { importDeductions(f); return false }" accept=".xlsx">
                 <ElButton type="success" class="custom-height" :loading="deductionBusy">导入 Excel</ElButton>
@@ -1879,6 +2049,45 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               </ElTableColumn>
             </ElTable>
           </div>
+
+          <ElDialog v-model="deductionCreateVisible" title="添加项目" width="620px">
+            <ElForm label-position="top" @submit.prevent="submitCreateDeduction">
+              <ElFormItem label="姓名">
+                <ElInput v-model.trim="deductionCreateForm.student_name" placeholder="不填时按「认定」学生自动生成" />
+              </ElFormItem>
+              <ElFormItem label="日期">
+                <div style="display:flex;gap:10px;width:100%">
+                  <ElDatePicker v-model="deductionCreateForm.date" type="date" value-format="YYYY-MM-DD" placeholder="选择日期" style="flex:1" />
+                  <ElTimePicker v-model="deductionCreateForm.clock" format="HH:mm" value-format="HH:mm" placeholder="选择时刻" style="flex:1" />
+                </div>
+              </ElFormItem>
+              <ElFormItem label="认定">
+                <ElSelect v-model="deductionCreateForm.recognized_student_ids" multiple filterable clearable placeholder="搜索学号或姓名，可多选" style="width:100%">
+                  <ElOption v-for="student in students" :key="student.id" :label="`${student.stu_name} (${student.id})`" :value="student.id" />
+                </ElSelect>
+              </ElFormItem>
+              <ElFormItem label="扣分内容">
+                <ElInput v-model="deductionCreateForm.content" type="textarea" :rows="2" placeholder="请填写扣分内容" />
+              </ElFormItem>
+              <ElFormItem label="分数">
+                <ElInputNumber v-model="deductionCreateForm.score" :step="0.1" :precision="2" style="width:100%" />
+              </ElFormItem>
+              <ElFormItem label="是否计入区队周扣分">
+                <ElSwitch v-model="deductionCreateForm.include_weekly" active-text="计入" inactive-text="不计入" />
+              </ElFormItem>
+              <ElFormItem label="扣分类型">
+                <ElRadioGroup v-model="deductionCreateForm.school_supervision">
+                  <ElRadio :value="false">大队督察扣分</ElRadio>
+                  <ElRadio :value="true">校督扣分</ElRadio>
+                </ElRadioGroup>
+                <div style="font-size:0.75em;color:#909399;margin-top:4px">校督扣分的记录 ID 会带 <code>xd_</code> 前缀，申诉时走校督申诉模板。</div>
+              </ElFormItem>
+              <div style="display:flex;gap:10px;justify-content:flex-end;">
+                <ElButton @click="deductionCreateVisible = false">取消</ElButton>
+                <ElButton type="primary" native-type="submit" :loading="deductionBusy">保存</ElButton>
+              </div>
+            </ElForm>
+          </ElDialog>
 
           <ElDialog :model-value="!!editingRecognition" title="编辑认定" width="500px" @close="cancelEditRecognition">
             <ElForm label-position="top" @submit.prevent="submitEditRecognition">

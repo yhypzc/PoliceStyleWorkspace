@@ -29,6 +29,10 @@ func NewSessionStore(ttl time.Duration) *SessionStore {
 	return store
 }
 
+// TTL is the idle window: a session stays valid for this long after the last
+// request that counted as user activity.
+func (s *SessionStore) TTL() time.Duration { return s.ttl }
+
 func (s *SessionStore) Create(username string) (string, string, error) {
 	// Sixteen random bytes encode to the requested 32-character session ID.
 	idBytes := make([]byte, 16)
@@ -46,21 +50,52 @@ func (s *SessionStore) Create(username string) (string, string, error) {
 	return id, csrfToken, nil
 }
 
+// Get validates the session cookie and slides its idle deadline forward, so a
+// session lives `ttl` after the last request rather than `ttl` after login.
 func (s *SessionStore) Get(r *http.Request) (Session, bool) {
+	return s.load(r, true)
+}
+
+// GetPassive validates without sliding the deadline. Background polling (the
+// clock sync) uses this so that an open-but-idle tab cannot keep itself signed
+// in: only real activity extends the session.
+func (s *SessionStore) GetPassive(r *http.Request) (Session, bool) {
+	return s.load(r, false)
+}
+
+func (s *SessionStore) load(r *http.Request, refresh bool) (Session, bool) {
 	c, err := r.Cookie(CookieName)
 	if err != nil {
 		return Session{}, false
 	}
-	s.mu.RLock()
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	session, ok := s.sessions[c.Value]
-	s.mu.RUnlock()
-	if !ok || time.Now().After(session.ExpiresAt) {
+	if !ok || now.After(session.ExpiresAt) {
 		if ok {
-			s.Delete(c.Value)
+			delete(s.sessions, c.Value)
 		}
 		return Session{}, false
 	}
+	if refresh {
+		session.ExpiresAt = now.Add(s.ttl)
+		s.sessions[c.Value] = session
+	}
 	return session, true
+}
+
+// Remaining reports how long the given session stays valid from now. It is used
+// by the frontend to schedule its own idle logout.
+func (s *SessionStore) Remaining(r *http.Request) time.Duration {
+	session, ok := s.load(r, false)
+	if !ok {
+		return 0
+	}
+	if remaining := time.Until(session.ExpiresAt); remaining > 0 {
+		return remaining
+	}
+	return 0
 }
 
 func (s *SessionStore) Delete(id string) {
@@ -106,8 +141,18 @@ func ClearCookie(w http.ResponseWriter) {
 }
 
 func RequireAuth(store *SessionStore, next http.Handler) http.Handler {
+	return requireAuth(store, next, true)
+}
+
+// RequireAuthPassive authenticates without extending the session. It is used
+// for background polling endpoints so that an idle tab still times out.
+func RequireAuthPassive(store *SessionStore, next http.Handler) http.Handler {
+	return requireAuth(store, next, false)
+}
+
+func requireAuth(store *SessionStore, next http.Handler, refresh bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		session, ok := store.Get(r)
+		session, ok := store.load(r, refresh)
 		if !ok {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -121,6 +166,13 @@ func RequireAuth(store *SessionStore, next http.Handler) http.Handler {
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`{"ok":false,"error":"csrf token invalid"}`))
 				return
+			}
+		}
+		// 会话续期的同时把 Cookie 的到期时间一起往后推，否则浏览器会先丢掉
+		// Cookie，服务端还活着的会话也再用不上。
+		if refresh {
+			if c, err := r.Cookie(CookieName); err == nil {
+				SetCookie(w, c.Value, store.TTL())
 			}
 		}
 		next.ServeHTTP(w, r)

@@ -237,6 +237,69 @@ func CreateDeductionRecordForStudents(db *sql.DB, r DeductionRecord, studentIDs 
 	return &r, nil
 }
 
+// CreateDeductionRecordWithOwnership inserts a manually added regular-deduction
+// record (the 「添加项目」 dialog). It honours both switches the dialog exposes —
+// whether the record counts toward the squadron weekly deduction and whether it
+// is a 校督 (school-supervision) record, which drives the `xd_` ID prefix and
+// therefore the appeal template — and attaches the selected 认定 students
+// (ownership rows) in the same transaction. 姓名 may be typed by hand or left
+// empty, in which case it is derived from the recognized students.
+func CreateDeductionRecordWithOwnership(db *sql.DB, r DeductionRecord, studentIDs []string) (*DeductionRecord, error) {
+	studentIDs = splitStudentIDs(strings.Join(studentIDs, ","))
+	r.StudentName = strings.TrimSpace(r.StudentName)
+	r.SubmitDate = strings.TrimSpace(r.SubmitDate)
+	r.Content = strings.TrimSpace(r.Content)
+	if r.SubmitDate == "" {
+		return nil, errors.New("日期不能为空")
+	}
+	if r.StudentName == "" && len(studentIDs) == 0 {
+		return nil, errors.New("请填写姓名或选择认定学生")
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("创建扣分记录失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	names := make([]string, 0, len(studentIDs))
+	for _, studentID := range studentIDs {
+		var studentName string
+		if err := tx.QueryRow(`SELECT stu_name FROM students WHERE id = ?`, studentID).Scan(&studentName); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("学号 %q 不存在", studentID)
+			}
+			return nil, fmt.Errorf("查询学生失败: %w", err)
+		}
+		names = append(names, studentName)
+	}
+	r.StudentID = strings.Join(studentIDs, ",")
+	if r.StudentName == "" {
+		r.StudentName = strings.Join(names, ", ")
+	}
+	r.RecognizedStudentIDs = studentIDs
+	r.RecognizedStudents = strings.Join(names, ", ")
+	r.ID = generateDeductionRecordID(r)
+	if _, err := tx.Exec(
+		`INSERT INTO police_style_records_single_subrecords (id, submit_date, student_name, content, score, include_weekly) VALUES (?, ?, ?, ?, ?, ?)`,
+		r.ID, r.SubmitDate, r.StudentName, r.Content, r.Score, includeWeeklyValue(r.IncludeWeekly),
+	); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint") {
+			return nil, fmt.Errorf("记录ID %q 已存在", r.ID)
+		}
+		return nil, fmt.Errorf("创建扣分记录失败: %w", err)
+	}
+	for _, studentID := range studentIDs {
+		if _, err := tx.Exec(`INSERT INTO ownership_single_subrecords (record_id, student_id) VALUES (?, ?)`, r.ID, studentID); err != nil {
+			return nil, fmt.Errorf("保存认定失败: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("保存扣分记录失败: %w", err)
+	}
+	return &r, nil
+}
+
 func splitStudentIDs(value string) []string {
 	seen := make(map[string]struct{})
 	studentIDs := make([]string, 0)

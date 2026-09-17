@@ -25,6 +25,11 @@ import (
 //go:embed static
 var embeddedStatic embed.FS
 
+// sessionIdleTimeout is how long a session survives without user activity. It is
+// an idle window, not a fixed lifetime: every request that counts as activity
+// (and the frontend's explicit heartbeat) pushes the deadline forward.
+const sessionIdleTimeout = 10 * time.Minute
+
 func main() {
 	instance, firstInstance := acquireServerInstance()
 	if !firstInstance {
@@ -60,7 +65,7 @@ func main() {
 		log.Printf("[系统] 初始密码: %s", initialPassword)
 	}
 
-	sessionStore := middleware.NewSessionStore(30 * time.Minute)
+	sessionStore := middleware.NewSessionStore(sessionIdleTimeout)
 	app := handlers.NewApp(db, sessionStore, filepath.Join(baseDir, "log", "server.log"), filepath.Join(baseDir, "config"))
 	app.StartDailyReportScheduler()
 	app.StartReportEventScheduler()
@@ -99,7 +104,9 @@ func main() {
 	mux.HandleFunc("POST /api/login", app.Login)
 	mux.Handle("POST /api/change-password", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ChangePassword)))
 	mux.Handle("GET /api/check-auth", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.CheckAuth)))
-	mux.Handle("GET /api/clock", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ServerClock)))
+	// 时钟对时是后台轮询，不刷新会话：闲置页面到点仍会掉线。
+	mux.Handle("GET /api/clock", middleware.RequireAuthPassive(sessionStore, http.HandlerFunc(app.ServerClock)))
+	mux.Handle("POST /api/session/touch", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.TouchSession)))
 	mux.Handle("GET /api/workspace/stats", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.WorkspaceStats)))
 	mux.Handle("GET /api/workspace/out-of-semester-records", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ListOutOfSemesterRecords)))
 	mux.Handle("GET /api/workspace/multi-without-subrecords-records", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ListMultiWithoutSubrecordsWorkspaceRecords)))
@@ -163,6 +170,7 @@ func main() {
 	mux.Handle("POST /api/deductions/import", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ImportDeductionRecords)))
 	mux.Handle("GET /api/deductions/template", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.DownloadDeductionTemplate)))
 	mux.Handle("GET /api/multi-deductions", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ListMultiDeductions)))
+	mux.Handle("POST /api/multi-deductions", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.CreateMultiDeduction)))
 	mux.Handle("PUT /api/multi-deductions/{id}", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.UpdateMultiDeduction)))
 	mux.Handle("POST /api/multi-deductions/batch-delete", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.DeleteMultiDeductions)))
 	mux.Handle("POST /api/multi-deductions/import", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ImportMultiDeductions)))

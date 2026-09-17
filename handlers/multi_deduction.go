@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -24,6 +25,21 @@ func (a *App) ListMultiDeductions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "records": records})
+}
+// CreateMultiDeduction backs the 「添加项目」 dialog on the multi-deduction page:
+// 日期、寝室名称、扣分项目、分数.
+func (a *App) CreateMultiDeduction(w http.ResponseWriter, r *http.Request) {
+	var req models.MultiDeductionRecord
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	rec, err := models.CreateMultiDeductionRecord(a.DB, req)
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	log.Printf("[寝室整体差] 新增记录 %q (寝室: %s, 扣分: %g)", rec.ID, rec.DormName, rec.Score)
+	writeJSON(w, 200, map[string]any{"ok": true, "record": rec})
 }
 func (a *App) UpdateMultiDeduction(w http.ResponseWriter, r *http.Request) {
 	var req models.MultiDeductionRecord

@@ -28,17 +28,43 @@ func (a *App) ListDeductionRecords(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "records": records})
 }
 
+// CreateDeductionRecord backs the 「添加项目」 dialog: 姓名、日期、认定学生、扣分内容、
+// 分数、是否计入区队周扣分、扣分类型（大队督察扣分／校督扣分）。include_weekly is
+// optional and defaults to true so older callers keep the previous behaviour.
 func (a *App) CreateDeductionRecord(w http.ResponseWriter, r *http.Request) {
-	var req models.DeductionRecord
+	var req struct {
+		SubmitDate           string   `json:"submit_date"`
+		StudentName          string   `json:"student_name"`
+		Content              string   `json:"content"`
+		Score                float64  `json:"score"`
+		IncludeWeekly        *bool    `json:"include_weekly"`
+		SchoolSupervision    bool     `json:"school_supervision"`
+		RecognizedStudentIDs []string `json:"recognized_student_ids"`
+	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	rec, err := models.CreateDeductionRecord(a.DB, req)
+	includeWeekly := true
+	if req.IncludeWeekly != nil {
+		includeWeekly = *req.IncludeWeekly
+	}
+	rec, err := models.CreateDeductionRecordWithOwnership(a.DB, models.DeductionRecord{
+		SubmitDate:        req.SubmitDate,
+		StudentName:       req.StudentName,
+		Content:           req.Content,
+		Score:             req.Score,
+		IncludeWeekly:     includeWeekly,
+		SchoolSupervision: req.SchoolSupervision,
+	}, req.RecognizedStudentIDs)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	log.Printf("[扣分] 新增记录 %q (姓名: %s, 扣分: %.1f)", rec.ID, rec.StudentName, rec.Score)
+	kind := "大队督察"
+	if req.SchoolSupervision {
+		kind = "校督"
+	}
+	log.Printf("[扣分] 新增记录 %q (%s, 姓名: %s, 认定 %d 人, 扣分: %g)", rec.ID, kind, rec.StudentName, len(rec.RecognizedStudentIDs), rec.Score)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "record": rec})
 }
 
