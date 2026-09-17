@@ -2080,7 +2080,6 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
                   <ElRadio :value="false">大队督察扣分</ElRadio>
                   <ElRadio :value="true">校督扣分</ElRadio>
                 </ElRadioGroup>
-                <div style="font-size:0.75em;color:#909399;margin-top:4px">校督扣分的记录 ID 会带 <code>xd_</code> 前缀，申诉时走校督申诉模板。</div>
               </ElFormItem>
               <div style="display:flex;gap:10px;justify-content:flex-end;">
                 <ElButton @click="deductionCreateVisible = false">取消</ElButton>
