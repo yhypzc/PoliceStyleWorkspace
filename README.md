@@ -417,8 +417,23 @@ cd ..
 
 ```PowerShell
 go mod tidy
-go build -ldflags="-H windowsgui" -o PoliceStyleWorkspace/bin/police-style-workspace-server.exe .
+go build -ldflags="-H windowsgui -s -w" -o PoliceStyleWorkspace/bin/police-style-workspace-server.exe .
+strip PoliceStyleWorkspace/bin/police-style-workspace-server.exe
+upx -9 PoliceStyleWorkspace/bin/police-style-workspace-server.exe
 ```
+
+发布构建的体积（`build.bat` 走的就是这条链）：
+
+| 步骤 | 大小 |
+|---|---|
+| `go build`（默认，带符号表 + DWARF） | 24.02 MB |
+| `-ldflags="-s -w"` | 17.48 MB |
+| `+ strip` | 17.48 MB（`-s` 已去掉 COFF 符号表，strip 只剩 512 字节可去掉） |
+| `+ upx -9` | **6.50 MB** |
+
+- **服务端是纯 Go，不存在"静态链接的第三方库"可拆成 DLL**：SQLite 用的是纯 Go 转译实现（`modernc.org/sqlite`，不链接 C 的 libsqlite3），excelize / golang.org/x/sys 同样是纯 Go。那 17 MB 是 Go 运行时与标准库本身，Go 链接器也不支持把运行时/标准库拆成 DLL，所以 `lib/` 目录对服务端没有内容可放——它的导入表里只有 `kernel32`、`ws2_32` 这类 Windows 系统 DLL。
+- **真正带一堆静态库的是 GUI**（`gui/CMakeLists.txt` 用了 `-static -static-libgcc -static-libstdc++`，EUI-NEO 的 freetype/harfbuzz/libpng/glfw/zlib 都以 `.a` 链了进去）。要改成动态链接需把 vendored 依赖按 shared 编译、把 DLL 放进 `lib/`，并解决 Windows 只在 exe 所在目录与 PATH 里找 DLL 的问题（需 `SetDllDirectory` 或 manifest），收益有限、风险不小，故沿用静态链接。
+- `-s -w` 只去掉 DWARF 与符号表，**不影响日志里的 `文件:行号`**：`log.Lshortfile` 依赖的是 pclntab（未被删除），实测发布版输出的 `main.go:193` 与源码行号一致，panic 栈里的函数名/行号同样保留。代价是 gdb/delve 这类需要符号的调试器用不了。
 
 GUI 使用 MinGW 构建 EUI\-NEO，目标为 Windows GUI 子系统：
 
