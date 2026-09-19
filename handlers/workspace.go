@@ -365,6 +365,17 @@ func (a *App) fillDailyExportDetails(file *excelize.File, start, end time.Time) 
 		file.SetCellValue(sheet, fmt.Sprintf("D%d", excelRow), detail.Score)
 		file.SetCellValue(sheet, fmt.Sprintf("E%d", excelRow), includeWeeklyText(detail.IncludeWeekly))
 	}
+	// 明细最下面加一行总计：分数列填本周扣分总和（即上面各明细行分数之和，
+	// 与工作表1的"总计"行同一写法，标签放 A 列）。
+	totalRow := len(rows) + 2
+	weekDetailTotal := 0.0
+	for _, detail := range rows {
+		weekDetailTotal += detail.Score
+	}
+	_ = file.SetCellStyle(sheet, fmt.Sprintf("A%d", totalRow), fmt.Sprintf("E%d", totalRow), detailTextStyle)
+	_ = file.SetCellStyle(sheet, fmt.Sprintf("D%d", totalRow), fmt.Sprintf("D%d", totalRow), detailDecimalStyle)
+	file.SetCellValue(sheet, fmt.Sprintf("A%d", totalRow), "总计")
+	file.SetCellValue(sheet, fmt.Sprintf("D%d", totalRow), weekDetailTotal)
 	return nil
 }
 
@@ -389,6 +400,10 @@ func includeWeeklyText(include bool) string {
 // as the weekly export's detail sheet. Unlike the weekly score statistics, the
 // detail listing keeps every record; each row carries its 是否计入区队周扣分
 // flag, which is always 是 for dorm overall-bad records.
+//
+// 未认定的记录也照样列出（不再跳过）：常规扣分没有任何认定学生时，整条记录的
+// 分数记成一行、姓名列用记录里保存的原始姓名字段；寝室整体差子项没有负责学生
+// 时按 record.Score/子项数 记成一行。
 func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, error) {
 	students, err := models.ListStudents(a.DB)
 	if err != nil {
@@ -405,7 +420,17 @@ func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, e
 	}
 	for _, record := range single {
 		date, ok := recordDate(record.SubmitDate)
-		if !ok || date.Before(start) || !date.Before(end) || len(record.RecognizedStudentIDs) == 0 {
+		if !ok || date.Before(start) || !date.Before(end) {
+			continue
+		}
+		if len(record.RecognizedStudentIDs) == 0 {
+			rows = append(rows, deductionDetailRow{
+				Date:          date.Format("2006-01-02"),
+				Name:          record.StudentName,
+				Content:       record.Content,
+				Score:         record.Score,
+				IncludeWeekly: record.IncludeWeekly,
+			})
 			continue
 		}
 		share := record.Score / float64(len(record.RecognizedStudentIDs))
@@ -431,6 +456,13 @@ func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, e
 		}
 		for _, sub := range subs {
 			if len(sub.StudentIDs) == 0 {
+				rows = append(rows, deductionDetailRow{
+					Date:          date.Format("2006-01-02"),
+					Name:          "",
+					Content:       record.Content + "_" + sub.Content,
+					Score:         record.Score / float64(len(subs)),
+					IncludeWeekly: true,
+				})
 				continue
 			}
 			share := record.Score / float64(len(subs)) / float64(len(sub.StudentIDs))
