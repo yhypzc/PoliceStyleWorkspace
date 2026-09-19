@@ -402,8 +402,9 @@ func includeWeeklyText(include bool) string {
 // flag, which is always 是 for dorm overall-bad records.
 //
 // 未认定的记录也照样列出（不再跳过）：常规扣分没有任何认定学生时，整条记录的
-// 分数记成一行、姓名列用记录里保存的原始姓名字段；寝室整体差子项没有负责学生
-// 时按 record.Score/子项数 记成一行。
+// 分数记成一行、姓名列用记录里保存的原始姓名字段（该字段也为空则写「未认定」）；
+// 寝室整体差子项没有负责学生时按 record.Score/子项数 记成一行；主记录连子项都
+// 没有（"无子项"）时整条记录记成一行。这几类没有归属的行姓名列统一显示「未认定」。
 func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, error) {
 	students, err := models.ListStudents(a.DB)
 	if err != nil {
@@ -426,7 +427,7 @@ func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, e
 		if len(record.RecognizedStudentIDs) == 0 {
 			rows = append(rows, deductionDetailRow{
 				Date:          date.Format("2006-01-02"),
-				Name:          record.StudentName,
+				Name:          unassignedDetailName(record.StudentName),
 				Content:       record.Content,
 				Score:         record.Score,
 				IncludeWeekly: record.IncludeWeekly,
@@ -452,13 +453,21 @@ func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, e
 			return nil, err
 		}
 		if len(subs) == 0 {
+			// "无子项"主记录：整条分数记一行，没有可分摊的对象
+			rows = append(rows, deductionDetailRow{
+				Date:          date.Format("2006-01-02"),
+				Name:          unassignedDetailName(""),
+				Content:       record.Content,
+				Score:         record.Score,
+				IncludeWeekly: true,
+			})
 			continue
 		}
 		for _, sub := range subs {
 			if len(sub.StudentIDs) == 0 {
 				rows = append(rows, deductionDetailRow{
 					Date:          date.Format("2006-01-02"),
-					Name:          "",
+					Name:          unassignedDetailName(""),
 					Content:       record.Content + "_" + sub.Content,
 					Score:         record.Score / float64(len(subs)),
 					IncludeWeekly: true,
@@ -473,6 +482,16 @@ func (a *App) deductionDetailRows(start, end time.Time) ([]deductionDetailRow, e
 		}
 	}
 	return rows, nil
+}
+
+// unassignedDetailName renders the 姓名 cell of a row that has no owner: a name
+// left over from the record itself is kept (it is what the operator typed), and
+// otherwise the cell reads 未认定 instead of being blank.
+func unassignedDetailName(raw string) string {
+	if name := strings.TrimSpace(raw); name != "" {
+		return name
+	}
+	return "未认定"
 }
 
 // addDeductionDetailsSheet appends a worksheet holding the deduction records
