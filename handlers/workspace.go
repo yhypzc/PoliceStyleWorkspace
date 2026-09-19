@@ -973,12 +973,15 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 		StudentIDs    []string `json:"student_ids"`
 		StudentNames  string   `json:"student_names"`
 	}
+	// 查询常规扣分记录。必须用 LEFT JOIN：未认定（没有任何认定学生）的记录也要
+	// 出现在本周扣分条目里，INNER JOIN 会把它们整条丢掉。没有归属时
+	// GROUP_CONCAT 返回 NULL，需 COALESCE 成空串才能扫进 string。
 	singleRows, err := a.DB.Query(`
 		SELECT r.id, r.submit_date, r.student_name, r.content, r.score, r.include_weekly,
-			GROUP_CONCAT(o.student_id, ','), GROUP_CONCAT(s.stu_name, ',')
+			COALESCE(GROUP_CONCAT(o.student_id, ','), ''), COALESCE(GROUP_CONCAT(s.stu_name, ','), '')
 		FROM police_style_records_single_subrecords r
-		JOIN ownership_single_subrecords o ON o.record_id = r.id
-		JOIN students s ON s.id = o.student_id
+		LEFT JOIN ownership_single_subrecords o ON o.record_id = r.id
+		LEFT JOIN students s ON s.id = o.student_id
 		WHERE r.submit_date >= ? AND r.submit_date < ?
 		GROUP BY r.id, r.submit_date, r.student_name, r.content, r.score, r.include_weekly
 		ORDER BY r.submit_date, r.id`,
@@ -1049,12 +1052,13 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 		multiOrder = append(multiOrder, id)
 	}
 
-	// 查询子项
+	// 查询子项。同样用 LEFT JOIN：没有指定负责学生的子项（未认定）也要列出来，
+	// 否则展开"无负责学生"的整体差记录时看不到子项。
 	subRows, err := a.DB.Query(`
-		SELECT s.id, s.belongs_to, s.content, GROUP_CONCAT(o.student_id, ','), GROUP_CONCAT(st.stu_name, ',')
+		SELECT s.id, s.belongs_to, s.content, COALESCE(GROUP_CONCAT(o.student_id, ','), ''), COALESCE(GROUP_CONCAT(st.stu_name, ','), '')
 		FROM subrecords_for_police_style_records_multi_subrecords s
-		JOIN ownership_multi_subrecords o ON o.subrecord_id = s.id
-		JOIN students st ON st.id = o.student_id
+		LEFT JOIN ownership_multi_subrecords o ON o.subrecord_id = s.id
+		LEFT JOIN students st ON st.id = o.student_id
 		WHERE s.belongs_to IN (SELECT id FROM police_style_records_multi_subrecords WHERE submit_date >= ? AND submit_date < ?)
 		GROUP BY s.id
 		ORDER BY s.id`,

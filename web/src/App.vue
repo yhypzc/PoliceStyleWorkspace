@@ -1691,7 +1691,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
     <ElTableColumn prop="date" label="日期" width="110" />
     <ElTableColumn prop="content" label="扣分项目" min-width="200" />
     <ElTableColumn prop="score" label="分数" width="80" />
-    <ElTableColumn prop="student_names" label="认定学生" min-width="160" />
+    <ElTableColumn prop="student_names" label="认定学生" min-width="160"><template #default="{ row }">{{ row.student_names || '未认定' }}</template></ElTableColumn>
     <ElTableColumn label="操作" width="270"><template #default="{ row }"><ElButton type="primary" size="small" @click="startEditDeduction(row)">编辑</ElButton><ElButton type="danger" size="small" @click="deleteDeduction(row)">删除</ElButton><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
       </ElTable>
   <h3>寝室整体差扣分项目</h3>
@@ -1699,9 +1699,10 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
     <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="filteredWeekMulti.length > 0 && weekBatchMultiIDs.length === filteredWeekMulti.length" :indeterminate="weekBatchMultiIDs.length > 0 && weekBatchMultiIDs.length < filteredWeekMulti.length" @change="value => toggleAllWeekMulti(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchMultiIDs.includes(row.id)" @change="value => toggleWeekMulti(row.id, Boolean(value))" /></template></ElTableColumn>
     <ElTableColumn type="expand">
       <template #default="{ row }">
-        <ElTable :data="row.subs" border size="small" style="width:100%">
+        <div v-if="!row.subs || row.subs.length === 0" style="padding:8px 12px;color:#e6a23c">该记录没有子项（无子项），请先用「子项管理」补上负责学生</div>
+        <ElTable v-else :data="row.subs" border size="small" style="width:100%">
           <ElTableColumn prop="content" label="子项内容" min-width="200" />
-          <ElTableColumn prop="student_names" label="负责学生" min-width="160" />
+          <ElTableColumn label="负责学生" min-width="160"><template #default="{ row: sub }">{{ sub.student_names || '未认定' }}</template></ElTableColumn>
         </ElTable>
       </template>
     </ElTableColumn>
