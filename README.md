@@ -53,6 +53,7 @@
 
 - 两个分区都必须用 `LEFT JOIN` 查（`handlers/workspace.go:DailyManagementWeekRecords`）：未认定的常规扣分记录**没有** `ownership_single_subrecords` 行，用 `INNER JOIN` 会把整条记录丢掉；同理没有指定负责学生的整体差子项也会被丢掉。`GROUP_CONCAT` 在无匹配行时返回 `NULL`，要 `COALESCE(..., '')` 才能扫进 `string`。
 - 常规扣分「认定学生」列与整体差子项「负责学生」列为空时显示「未认定」；整体差记录没有子项时展开区提示「该记录没有子项（无子项）」。
+- 常规扣分「认定学生」列带「编辑」按钮，直接调起共用的「编辑认定」弹窗（`PUT /api/deductions/{id}/recognition`），保存后自动刷新本周条目列表；认定清空即回到「未认定」。该弹窗因此从扣分记录管理页移到 `<main>` 下的共享弹窗区（与申诉、编辑扣分记录弹窗并列），否则在日常综合管理页不会渲染。`startEditRecognition` 同时兼容两种行形状：扣分记录管理页给 `recognized_student_ids`、本周条目汇总给 `student_ids`。
 
 学期总表动态统计，支持导出。
 

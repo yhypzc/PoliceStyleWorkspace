@@ -1194,10 +1194,13 @@ async function submitStudentBatchDelete() {
   } catch (error: any) { ElMessage.error(error.message) }
   finally { studentBusy.value = false }
 }
-async function startEditRecognition(r: Deduction) {
+// 「认定学生」编辑在两处都能打开，但两处传进来的行字段名不同：
+// 扣分记录管理页用 recognized_student_ids，本周扣分条目汇总用 student_ids。
+type RecognitionTarget = { id: string; recognized_student_ids?: string[]; student_ids?: string[] }
+async function startEditRecognition(r: RecognitionTarget) {
   if (students.value.length === 0) await loadStudents()
-  editingRecognition.value = r
-  recognizedStudentIDs.value = [...(r.recognized_student_ids || [])]
+  editingRecognition.value = r as unknown as Deduction
+  recognizedStudentIDs.value = [...(r.recognized_student_ids || r.student_ids || [])]
 }
 function cancelEditRecognition() {
   editingRecognition.value = null
@@ -1210,7 +1213,8 @@ async function submitEditRecognition() {
     await api(`/api/deductions/${editingRecognition.value.id}/recognition`, { method: 'PUT', body: JSON.stringify({ student_ids: recognizedStudentIDs.value }) })
     ElMessage.success('认定已更新')
     cancelEditRecognition()
-    await loadDeductions()
+    if (page.value === 'deductions') await loadDeductions()
+    await refreshWeekViewIfOpen()
   } catch (error: any) { ElMessage.error(error.message) }
   finally { deductionBusy.value = false }
 }
@@ -1517,6 +1521,26 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             </div>
           </div>
         </ElDialog>
+        <!-- 「认定学生」编辑弹窗：所有页面共享（扣分记录管理、本周扣分条目汇总等） -->
+        <ElDialog :model-value="!!editingRecognition" title="编辑认定" width="500px" @close="cancelEditRecognition">
+          <ElForm label-position="top" @submit.prevent="submitEditRecognition">
+            <ElFormItem label="记录ID">
+              <ElInput :model-value="editingRecognition?.id || ''" disabled />
+            </ElFormItem>
+            <ElFormItem label="扣分内容">
+              <ElInput :model-value="editingRecognition?.content || ''" disabled />
+            </ElFormItem>
+            <ElFormItem label="认定学生">
+              <ElSelect v-model="recognizedStudentIDs" multiple filterable clearable placeholder="搜索学号或姓名，可多选" style="width:100%">
+                <ElOption v-for="student in students" :key="student.id" :label="`${student.stu_name} (${student.id})`" :value="student.id" />
+              </ElSelect>
+            </ElFormItem>
+            <div style="display:flex;gap:10px;justify-content:flex-end;">
+              <ElButton @click="cancelEditRecognition">取消</ElButton>
+              <ElButton type="primary" native-type="submit" :loading="deductionBusy">保存</ElButton>
+            </div>
+          </ElForm>
+        </ElDialog>
         <!-- 常规扣分/寝室整体差编辑与子项管理弹窗：所有页面共享（扣分记录管理、整体差管理、本周扣分条目汇总） -->
         <ElDialog :model-value="!!editingDeduction" title="编辑扣分记录" width="500px" @close="cancelEditDeduction">
           <ElForm label-position="top" @submit.prevent="submitEditDeduction">
@@ -1691,7 +1715,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
     <ElTableColumn prop="date" label="日期" width="110" />
     <ElTableColumn prop="content" label="扣分项目" min-width="200" />
     <ElTableColumn prop="score" label="分数" width="80" />
-    <ElTableColumn prop="student_names" label="认定学生" min-width="160"><template #default="{ row }">{{ row.student_names || '未认定' }}</template></ElTableColumn>
+    <ElTableColumn label="认定学生" min-width="210"><template #default="{ row }"><span>{{ row.student_names || '未认定' }}</span><ElButton type="primary" text size="small" style="margin-left:6px" @click="startEditRecognition(row)">编辑</ElButton></template></ElTableColumn>
     <ElTableColumn label="操作" width="270"><template #default="{ row }"><ElButton type="primary" size="small" @click="startEditDeduction(row)">编辑</ElButton><ElButton type="danger" size="small" @click="deleteDeduction(row)">删除</ElButton><ElButton type="primary" size="small" @click="openAppeal(row)">导出申诉模板</ElButton></template></ElTableColumn>
       </ElTable>
   <h3>寝室整体差扣分项目</h3>
@@ -2084,20 +2108,6 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               </ElFormItem>
               <div style="display:flex;gap:10px;justify-content:flex-end;">
                 <ElButton @click="deductionCreateVisible = false">取消</ElButton>
-                <ElButton type="primary" native-type="submit" :loading="deductionBusy">保存</ElButton>
-              </div>
-            </ElForm>
-          </ElDialog>
-
-          <ElDialog :model-value="!!editingRecognition" title="编辑认定" width="500px" @close="cancelEditRecognition">
-            <ElForm label-position="top" @submit.prevent="submitEditRecognition">
-              <ElFormItem label="认定学生">
-                <ElSelect v-model="recognizedStudentIDs" multiple filterable clearable placeholder="搜索学号或姓名" style="width:100%">
-                  <ElOption v-for="student in students" :key="student.id" :label="`${student.stu_name} (${student.id})`" :value="student.id" />
-                </ElSelect>
-              </ElFormItem>
-              <div style="display:flex;gap:10px;justify-content:flex-end;">
-                <ElButton @click="cancelEditRecognition">取消</ElButton>
                 <ElButton type="primary" native-type="submit" :loading="deductionBusy">保存</ElButton>
               </div>
             </ElForm>
