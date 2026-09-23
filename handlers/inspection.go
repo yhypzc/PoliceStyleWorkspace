@@ -265,7 +265,8 @@ func inspectionScore(value string) float64 {
 	return score
 }
 
-// splitInspectionItem 把一行检查内容拆成「姓名」和「扣分项目」，规则：
+// splitInspectionItem 把一行检查内容拆成「姓名」和「扣分项目」，规则（示例里的
+// 姓名与编号都是占位值，真实姓名只在导入时匹配本地 students 表）：
 //
 //  1. 行首就是学生姓名 → 姓名=该姓名，其余为内容
 //     （张三 上午 腰带摆放不规范 / 李四早二阳台晾衣杆摆放有问题）
@@ -334,7 +335,8 @@ func firstInspectionKeyword(line string) (int, int) {
 	return bestIndex, bestLength
 }
 
-// matchStudentNameInText 在片段里找学生姓名，取最长的那个（用于「10003孙七」）。
+// matchStudentNameInText 在片段里找学生姓名，取最长的那个（用于「10003孙七」这种
+// 房间号/编号与姓名连写的情况）。
 func matchStudentNameInText(text string, students []models.Student) string {
 	best := ""
 	for _, student := range students {
