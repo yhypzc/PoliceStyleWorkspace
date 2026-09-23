@@ -850,6 +850,9 @@ async function saveAppealConfig() {
   } catch (e: any) { ElMessage.error(e.message) }
   finally { appealSaving.value = false }
 }
+function appealPhotoUrl(filename: string) {
+  return `/api/appeal/photo?key=${encodeURIComponent(appealKey.value)}&filename=${encodeURIComponent(filename)}`
+}
 async function uploadAppealPhoto(type: string) {
   const input = document.createElement('input'); input.type = 'file'; input.accept = '.jpg,.jpeg,.png,.webp'
   input.onchange = async () => {
@@ -1499,17 +1502,35 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElFormItem label="学生复议情况说明"><ElInput v-model="appealText" type="textarea" :rows="3" placeholder="请填写复议情况说明" /></ElFormItem>
               <template v-if="!appealIsSchool">
                 <ElFormItem label="大督扣分照片">
-                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealDdPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'dd')">×</ElButton></div></div>
+                  <div class="appeal-photo-grid">
+                    <div v-for="(p,i) in appealDdPhotos" :key="p" class="appeal-photo-card">
+                      <ElImage :src="appealPhotoUrl(p)" fit="cover" :preview-src-list="appealDdPhotos.map(appealPhotoUrl)" :initial-index="i" preview-teleported class="appeal-photo-thumb" />
+                      <div class="appeal-photo-name" :title="p">{{ p }}</div>
+                      <ElButton text type="danger" size="small" class="appeal-photo-del" @click="deleteAppealPhoto(p, 'dd')">×</ElButton>
+                    </div>
+                  </div>
                   <ElButton size="small" @click="uploadAppealPhoto('dd')">上传照片</ElButton>
                 </ElFormItem>
                 <ElFormItem label="申诉照片">
-                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealAppealPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton></div></div>
+                  <div class="appeal-photo-grid">
+                    <div v-for="(p,i) in appealAppealPhotos" :key="p" class="appeal-photo-card">
+                      <ElImage :src="appealPhotoUrl(p)" fit="cover" :preview-src-list="appealAppealPhotos.map(appealPhotoUrl)" :initial-index="i" preview-teleported class="appeal-photo-thumb" />
+                      <div class="appeal-photo-name" :title="p">{{ p }}</div>
+                      <ElButton text type="danger" size="small" class="appeal-photo-del" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton>
+                    </div>
+                  </div>
                   <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
                 </ElFormItem>
               </template>
               <template v-else>
                 <ElFormItem label="申诉照片">
-                  <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"><div v-for="(p,i) in appealAppealPhotos" :key="i" style="display:flex;align-items:center;gap:4px;background:#f5f7fa;padding:4px 8px;border-radius:4px"><span style="font-size:12px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p }}</span><ElButton text type="danger" size="small" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton></div></div>
+                  <div class="appeal-photo-grid">
+                    <div v-for="(p,i) in appealAppealPhotos" :key="p" class="appeal-photo-card">
+                      <ElImage :src="appealPhotoUrl(p)" fit="cover" :preview-src-list="appealAppealPhotos.map(appealPhotoUrl)" :initial-index="i" preview-teleported class="appeal-photo-thumb" />
+                      <div class="appeal-photo-name" :title="p">{{ p }}</div>
+                      <ElButton text type="danger" size="small" class="appeal-photo-del" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton>
+                    </div>
+                  </div>
                   <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
                 </ElFormItem>
               </template>

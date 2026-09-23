@@ -472,6 +472,32 @@ func (a *App) SaveAppealConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// AppealPhoto 把已上传的申诉证据照片回给前端，用于在申诉弹窗里显示图片内容
+// （不再只显示文件名）。文件名走和删除同一套严格校验：小写化 + 白名单扩展名 +
+// 必须匹配服务端生成格式 <16位小写hex>_<6位小写hex><ext>，再用
+// safeExistingAppealPhotoPath 做软链接与越界检查，因此 http.ServeFile 拿到的
+// 一定是该记录证据目录内的真实文件。
+func (a *App) AppealPhoto(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if !safeAppealRecordKey(key) {
+		writeError(w, http.StatusBadRequest, "记录标识无效")
+		return
+	}
+	name := safeDeleteAppealPhotoName(r.URL.Query().Get("filename"))
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "图片文件名无效")
+		return
+	}
+	path, err := safeExistingAppealPhotoPath(a.ConfigDir, key, name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "图片不存在")
+		return
+	}
+	// 文件名带随机串、内容不会变，但仍用 no-store：删除/重传后不至于看到缓存旧图。
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, path)
+}
+
 func (a *App) UploadAppealPhoto(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if !safeAppealRecordKey(key) {

@@ -122,6 +122,7 @@ func main() {
 	mux.Handle("GET /api/appeal/config", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.GetAppealConfig)))
 	mux.Handle("POST /api/appeal/config", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.SaveAppealConfig)))
 	mux.Handle("POST /api/appeal/upload-photo", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.UploadAppealPhoto)))
+	mux.Handle("GET /api/appeal/photo", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.AppealPhoto)))
 	mux.Handle("POST /api/appeal/delete-photo", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.DeleteAppealPhoto)))
 	mux.Handle("GET /api/appeal/export-zip", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ExportAppealZip)))
 	mux.Handle("POST /api/appeal/batch-export", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.BatchExportAppealZip)))
