@@ -2032,7 +2032,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElInput v-model="deductionSearch" clearable placeholder="搜索记录 ID、姓名、认定、日期、内容或分数" style="width:400px" />
               <ElButton type="primary" class="custom-height" @click="openCreateDeduction">添加项目</ElButton>
               <ElButton type="primary" class="custom-height" @click="downloadDeductionTemplate">模板下载</ElButton>
-              <ElUpload :show-file-list="false" :before-upload="(f) => { importDeductions(f); return false }" accept=".xlsx">
+              <ElUpload :show-file-list="false" :before-upload="(f) => { importDeductions(f); return false }" accept=".xlsx,.xls">
                 <ElButton type="success" class="custom-height" :loading="deductionBusy">导入 Excel</ElButton>
               </ElUpload>
               <ElButton type="danger" class="custom-height" @click="openBatchDelete">批量删除</ElButton>

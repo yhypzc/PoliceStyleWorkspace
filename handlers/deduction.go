@@ -148,19 +148,42 @@ func (a *App) ImportDeductionRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	if !strings.HasSuffix(strings.ToLower(header.Filename), ".xlsx") {
-		writeError(w, http.StatusBadRequest, "仅支持 .xlsx 格式")
+	if !strings.HasSuffix(strings.ToLower(header.Filename), ".xlsx") && !strings.HasSuffix(strings.ToLower(header.Filename), ".xls") {
+		writeError(w, http.StatusBadRequest, "仅支持 .xlsx / .xls 格式")
 		return
 	}
 
-	f, err := excelize.OpenReader(file)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "无法读取 Excel 文件: "+err.Error())
+	// 老式 .xls（OLE2 复合文档）excelize 读不了，按文件头判断用哪个解析器。
+	// 注意 ".xlsx" 并不以 ".xls" 结尾，所以扩展名判断不会误判。
+	isOLE2 := false
+	magic := make([]byte, 4)
+	if n, _ := io.ReadFull(file, magic); n == len(magic) {
+		isOLE2 = magic[0] == 0xD0 && magic[1] == 0xCF && magic[2] == 0x11 && magic[3] == 0xE0
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(w, http.StatusBadRequest, "无法读取上传文件: "+err.Error())
 		return
 	}
-	defer f.Close()
 
-	imported, errs := a.importDeductionWorkbook(f, false)
+	var imported []models.DeductionRecord
+	var errs []string
+	if isOLE2 {
+		rows, err := readXLSRows(file)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		imported, errs = a.importDeductionRows(rows, false)
+	} else {
+		f, err := excelize.OpenReader(file)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "无法读取 Excel 文件: "+err.Error())
+			return
+		}
+		defer f.Close()
+		imported, errs = a.importDeductionWorkbook(f, false)
+	}
+
 	result := map[string]any{"ok": true, "imported": len(imported), "records": imported}
 	if len(errs) > 0 {
 		result["errors"] = errs
@@ -185,16 +208,7 @@ type parsedDeductionRow struct {
 // 「信网学院日警务化管理通报结果（9月7日）」.
 var massNoticeTitlePattern = regexp.MustCompile(`警务化管理通报结果\s*[（(]\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*[）)]`)
 
-// importDeductionWorkbook parses deduction rows from an opened workbook and
-// inserts them into the regular-deduction tables. It returns the imported
-// records and any per-row failures. When skipExisting is true, rows whose
-// deterministic record ID already exists are treated as already imported and
-// skipped silently (keeps the daily-report auto-import idempotent).
-// 若某行违规学号为空：先用姓名字段在学生表中查学号，查到则用该学号关联；
-// 姓名也查不到（或无姓名）时，作为"未认定"记录（无学生归属）入库，供后续认定。
-// 除常规导入模板外，同时兼容每日「警务化管理通报结果」表格（见 parseMassNoticeRows）。
-// 扣分类型逐行判定：日期写「月.日」的行是校督扣分（ID 加 xd_ 前缀、负分取绝对值、
-// 走校督申诉模板），其余行是大队督察扣分（见 isSchoolSupervisionDate）。
+// importDeductionWorkbook 从已打开的 .xlsx 取出行，交给 importDeductionRows。
 func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (imported []models.DeductionRecord, errs []string) {
 	sheetName := f.GetSheetName(0)
 	if sheetName == "" {
@@ -204,12 +218,29 @@ func (a *App) importDeductionWorkbook(f *excelize.File, skipExisting bool) (impo
 	if err != nil {
 		return nil, append(errs, "读取工作表失败: "+err.Error())
 	}
+	return a.importDeductionRows(rows, skipExisting)
+}
+
+// importDeductionRows 是 .xlsx / .xls 共用的解析入口，按版式依次尝试：
+//
+//  1. 每日「警务化管理通报结果」表格（无学号列，按配置区队过滤）→ parseMassNoticeRows
+//  2. 信网大队《警务化管理日常检查表》（.xls，区队分段 + 内务组/警容风纪组/生活秩序）→ parseInspectionRows
+//  3. 常规导入模板（有学号列，扣分类型逐行判定，见 isSchoolSupervisionDate）
+//
+// 若某行违规学号为空：先用姓名字段在学生表中查学号，查到则用该学号关联；
+// 姓名也查不到（或无姓名）时，作为"未认定"记录（无学生归属）入库，供后续认定。
+// skipExisting 为 true 时，ID 已存在的行视为已导入并静默跳过（每日播报自动入库用）。
+func (a *App) importDeductionRows(rows [][]string, skipExisting bool) (imported []models.DeductionRecord, errs []string) {
 	if len(rows) < 2 {
 		return nil, append(errs, "Excel 文件中没有数据行（除表头外至少需要一行数据）")
 	}
 
 	// 每日「警务化管理通报结果」表格：无学号列，按配置的区队名称过滤后导入
 	if parsed, parseErrs, ok := a.parseMassNoticeRows(rows); ok {
+		return a.persistDeductionRows(parsed, parseErrs, skipExisting)
+	}
+	// 信网大队《警务化管理日常检查表》.xls
+	if parsed, parseErrs, ok := a.parseInspectionRows(rows); ok {
 		return a.persistDeductionRows(parsed, parseErrs, skipExisting)
 	}
 
