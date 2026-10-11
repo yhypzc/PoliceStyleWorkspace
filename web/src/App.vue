@@ -2086,7 +2086,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
                 <ElDatePicker v-model="multiDeductionCreateForm.date" type="date" value-format="YYYY-MM-DD" placeholder="请选择日期" style="width:100%" />
               </ElFormItem>
               <ElFormItem label="寝室名称">
-                <ElInput v-model.trim="multiDeductionCreateForm.dorm_name" placeholder="如：14#520" />
+                <ElInput v-model.trim="multiDeductionCreateForm.dorm_name" placeholder="如：10#101" />
               </ElFormItem>
               <ElFormItem label="扣分项目">
                 <ElInput v-model="multiDeductionCreateForm.content" type="textarea" :rows="2" placeholder="请填写扣分项目" />

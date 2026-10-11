@@ -298,8 +298,8 @@ func splitInspectionItem(raw string, students []models.Student, squad string) (s
 	index, length := firstInspectionKeyword(line)
 	switch {
 	case index == 0:
-		// 时间关键词写在最前面：「早二 蒋子震 腰带挂置不规范」。关键词后面能认出
-		// 学生姓名时把姓名拆出来、时间挪到扣分项目开头，得到与「蒋子震 早二
+		// 时间关键词写在最前面：「早二 张三 腰带挂置不规范」。关键词后面能认出
+		// 学生姓名时把姓名拆出来、时间挪到扣分项目开头，得到与「张三 早二
 		// 腰带挂置不规范」完全相同的记录；认不出就维持原行为，整行记到区队名下
 		// （「早二 包干区窗槽脏」这类本来就没有归属人）。
 		if name, item := splitTimeFirstItem(line, length, students); name != "" {
@@ -344,9 +344,9 @@ func firstInspectionKeyword(line string) (int, int) {
 }
 
 // splitTimeFirstItem 处理「时间关键词写在行首」的写法：把关键词后面的学生姓名拆
-// 出来，时间关键词挪到扣分项目开头，于是「早二 蒋子震 腰带挂置不规范」与
-// 「蒋子震 早二 腰带挂置不规范」得到完全相同的记录。姓名与项目连写（「早二
-// 陈子凡枕头套放反了」）也能靠 HasPrefix 拆开。
+// 出来，时间关键词挪到扣分项目开头，于是「早二 张三 腰带挂置不规范」与
+// 「张三 早二 腰带挂置不规范」得到完全相同的记录。姓名与项目连写（「早二
+// 李四枕头套放反了」）也能靠 HasPrefix 拆开。
 //
 // 只有能在 students 表里认出姓名、且姓名后面还有扣分项目时才返回；name 为空表示
 // 认不出，调用方维持「整行记到区队名下」的原行为 —— 「早二 包干区窗槽脏」这类

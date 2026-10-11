@@ -927,8 +927,8 @@ func (a *App) appealSchoolBaseName(studentIDs, displayNames, recordLabel, conten
 	return joinAppealNameParts(studentIDs, displayNames, a.appealDormNumber(recordLabel), content, dateMD)
 }
 
-// normalizeDormToken 归一化校督扣分表里写寝室号的几种写法：「15#406」「15＃406」
-// →「15406」，「5-302」→「5302」，并去掉两端与中间的空格（含全角）。
+// normalizeDormToken 归一化校督扣分表里写寝室号的几种写法：「10#101」「10＃101」
+// →「10101」，「3-201」→「3201」，并去掉两端与中间的空格（含全角）。
 func normalizeDormToken(value string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
@@ -1062,7 +1062,7 @@ func (a *App) loadAppealImages(key string, names []string) []appealImage {
 
 // appealRecordInfo derives all filename fields from the record ID. recordLabel
 // is the record's own 「姓名」列原文：校督扣分表经常在那里写寝室号（如
-// 「15#406」「15406」），而认定到的学生姓名来自 ownership 关联，两者不是一回事。
+// 「10#101」「10101」），而认定到的学生姓名来自 ownership 关联，两者不是一回事。
 func (a *App) appealRecordInfo(id string) (date, content, names, studentIDs, recordLabel string, isSchool bool, err error) {
 	var ids string
 	err = a.DB.QueryRow(`
