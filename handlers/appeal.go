@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 
+	"PoliceStyleWorkspace/models"
+
 	_ "embed"
 )
 
@@ -248,6 +250,14 @@ func (s *appealStore) setClass(c string) { s.mu.Lock(); defer s.mu.Unlock(); s.c
 
 func appealRecordHasData(record appealRecord) bool {
 	return strings.TrimSpace(record.TextContent) != "" || len(record.DdPhotos) > 0 || len(record.AppealPhotos) > 0
+}
+
+// appealTemplateSaved reports whether the weekly list should mark a record as
+// 「申诉模板已保存」. The bar is higher than "the store has an entry": the
+// 申诉情况说明 must actually carry text. An entry holding only photos — or one
+// auto-created by 批量导出 (an empty appealRecord) — does not count.
+func appealTemplateSaved(record appealRecord, found bool) bool {
+	return found && strings.TrimSpace(record.TextContent) != ""
 }
 
 func appealRecordUnrecognized(names, studentIDs string) bool {
@@ -764,7 +774,7 @@ func (a *App) BatchExportAppealZip(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) buildAppealZipItem(recordID string, store *appealStore, createMissing bool) (*appealZipItem, bool, error) {
-	recordDate, recordContent, recordNames, recordStudentIDs, isSchool, err := a.appealRecordInfo(recordID)
+	recordDate, recordContent, recordNames, recordStudentIDs, recordLabel, isSchool, err := a.appealRecordInfo(recordID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -788,15 +798,15 @@ func (a *App) buildAppealZipItem(recordID string, store *appealStore, createMiss
 
 	var docName, zipName, recordFolder, groupFolder, category string
 	if isSchool {
-		if unrecognized {
-			docName = cleanFn(fmt.Sprintf("未认定%s%s.doc", dateMD, recordContent))
-			zipName = cleanFn(fmt.Sprintf("未认定%s%s.zip", dateMD, recordContent))
-			recordFolder = cleanFn(fmt.Sprintf("未认定%s%s", dateMD, recordContent))
-		} else {
-			docName = cleanFn(fmt.Sprintf("%s%s%s%s.doc", recordStudentIDs, recordNames, dateMD, recordContent))
-			zipName = cleanFn(fmt.Sprintf("%s%s%s%s.zip", recordStudentIDs, recordNames, dateMD, recordContent))
-			recordFolder = cleanFn(fmt.Sprintf("%s%s%s%s", recordStudentIDs, recordNames, dateMD, recordContent))
+		// 校督文件名按校监下发表单的列序拼：学号 姓名 寝室号 违纪事项 日期，
+		// 段间用空格分隔，取不到内容的段直接省略（不会留下连续空格）。
+		base := a.appealSchoolBaseName(recordStudentIDs, displayNames, recordLabel, recordContent, dateMD)
+		if base == "" {
+			base = cleanFn("未认定" + recordID)
 		}
+		docName = cleanFn(base + ".doc")
+		zipName = cleanFn(base + ".zip")
+		recordFolder = cleanFn(base)
 		category = "校督"
 	} else {
 		docName = cleanFn(fmt.Sprintf("%s%s.doc", dateMD, recordContent))
@@ -818,27 +828,22 @@ func (a *App) buildAppealZipItem(recordID string, store *appealStore, createMiss
 	if isSchool {
 		template = schoolAppealTemplate
 	}
-	ddImages := a.loadAppealImages(recordID, r2.DdPhotos)
-	loadedAppealImages := a.loadAppealImages(recordID, r2.AppealPhotos)
-	appealImages := loadedAppealImages
-	photoImages := ddImages
-	if isSchool {
-		photoImages = loadedAppealImages
-		appealImages = nil
-	}
+	// 两类照片一一对应模板里的两个插入点：dd_photos 是“扣分项目截图+扣分照片”，
+	// appeal_photos 是“证据照片”。校督旧数据一直存在 appeal_photos 里，因此会
+	// 自动落到 <photo2>（证据照片）位置，无需改 JSON。
+	photoImages := a.loadAppealImages(recordID, r2.DdPhotos)
+	appealImages := a.loadAppealImages(recordID, r2.AppealPhotos)
 	// 申请日期取扣分记录本身的日期（只取日期部分）
 	recordDateOnly := recordDate
 	if len(recordDateOnly) > 10 {
 		recordDateOnly = recordDateOnly[:10]
 	}
-	docData, err := fillAppealDoc(template, grade, class, displayNames, dateMD, recordDateOnly, recordContent, r2.TextContent, isSchool, photoImages, appealImages)
+	docData, err := fillAppealDoc(template, grade, class, displayNames, recordStudentIDs, dateMD, recordDateOnly, recordContent, r2.TextContent, isSchool, photoImages, appealImages)
 	if err != nil {
 		return nil, created, fmt.Errorf("生成申诉模板失败: %w", err)
 	}
-	evidenceImages := append(append([]appealImage{}, ddImages...), loadedAppealImages...)
-	if isSchool {
-		evidenceImages = loadedAppealImages
-	}
+	// 证据目录与大队督察保持一致：两类照片都随包导出。
+	evidenceImages := append(append([]appealImage{}, photoImages...), appealImages...)
 	evidence := appealEvidenceFiles(evidenceImages)
 	return &appealZipItem{
 		Category:      category,
@@ -903,6 +908,61 @@ func appealClassFolder(value string) string {
 		return "未设置区队"
 	}
 	return value
+}
+
+// joinAppealNameParts 用单个空格拼接各段，空段直接省略，因此不会出现连续空格。
+func joinAppealNameParts(parts ...string) string {
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			kept = append(kept, part)
+		}
+	}
+	return strings.Join(kept, " ")
+}
+
+// appealSchoolBaseName 组装校督导出文档/文件夹的基本名，列序与校监下发表单标题
+// 一致：学号 姓名 寝室号 违纪事项 日期。
+func (a *App) appealSchoolBaseName(studentIDs, displayNames, recordLabel, content, dateMD string) string {
+	return joinAppealNameParts(studentIDs, displayNames, a.appealDormNumber(recordLabel), content, dateMD)
+}
+
+// normalizeDormToken 归一化校督扣分表里写寝室号的几种写法：「15#406」「15＃406」
+// →「15406」，「5-302」→「5302」，并去掉两端与中间的空格（含全角）。
+func normalizeDormToken(value string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '#', '＃', '-', '－', ' ', '\t', '\u3000', '\u00a0':
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+}
+
+// appealDormNumber 判断校督扣分记录自身「姓名」列里写的是不是寝室号。扣分表表示
+// 寝室有两种写法（「xx#xxx」和「xxxxx」），先把 # 之类的分隔符去掉，再拿原值和
+// 归一值分别到 dorm 表里查，只有查得到才算数；查不到就返回空串（文件名里不加
+// 这一段）。认定到的学生姓名、区队名都查不到，自然会被排除。
+func (a *App) appealDormNumber(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	dorms, err := models.ListDorms(a.DB)
+	if err != nil {
+		return ""
+	}
+	normalized := normalizeDormToken(raw)
+	for _, dorm := range dorms {
+		name := strings.TrimSpace(dorm.Name)
+		if name == "" {
+			continue
+		}
+		if name == raw || (normalized != "" && name == normalized) {
+			return name
+		}
+	}
+	return ""
 }
 
 func appealGroupFolder(names, ids string) string {
@@ -1000,30 +1060,32 @@ func (a *App) loadAppealImages(key string, names []string) []appealImage {
 	return images
 }
 
-// appealRecordInfo derives all filename fields from the record ID.
-func (a *App) appealRecordInfo(id string) (date, content, names, studentIDs string, isSchool bool, err error) {
+// appealRecordInfo derives all filename fields from the record ID. recordLabel
+// is the record's own 「姓名」列原文：校督扣分表经常在那里写寝室号（如
+// 「15#406」「15406」），而认定到的学生姓名来自 ownership 关联，两者不是一回事。
+func (a *App) appealRecordInfo(id string) (date, content, names, studentIDs, recordLabel string, isSchool bool, err error) {
 	var ids string
 	err = a.DB.QueryRow(`
-		SELECT r.submit_date, r.content,
+		SELECT r.submit_date, r.content, r.student_name,
 		       COALESCE(GROUP_CONCAT(o.student_id, ','), ''),
 		       COALESCE(GROUP_CONCAT(s.stu_name, ','), '')
 		FROM police_style_records_single_subrecords r
 		LEFT JOIN ownership_single_subrecords o ON o.record_id = r.id
 		LEFT JOIN students s ON s.id = o.student_id
 		WHERE r.id = ?
-		GROUP BY r.id, r.submit_date, r.content`, id).Scan(&date, &content, &ids, &names)
+		GROUP BY r.id, r.submit_date, r.content, r.student_name`, id).Scan(&date, &content, &recordLabel, &ids, &names)
 	if err == nil {
-		return date, content, names, ids, strings.HasPrefix(id, "xd_"), nil
+		return date, content, names, ids, recordLabel, strings.HasPrefix(id, "xd_"), nil
 	}
 	if err != sql.ErrNoRows {
-		return "", "", "", "", false, err
+		return "", "", "", "", "", false, err
 	}
 
 	// Multi-deduction IDs identify a parent record; students are attached to
 	// its child records, so collect each student once in database order.
-	err = a.DB.QueryRow(`SELECT submit_date, content FROM police_style_records_multi_subrecords WHERE id = ?`, id).Scan(&date, &content)
+	err = a.DB.QueryRow(`SELECT submit_date, content, dorm_name FROM police_style_records_multi_subrecords WHERE id = ?`, id).Scan(&date, &content, &recordLabel)
 	if err != nil {
-		return "", "", "", "", false, err
+		return "", "", "", "", "", false, err
 	}
 	rows, queryErr := a.DB.Query(`
 		SELECT o.student_id, s.stu_name
@@ -1033,7 +1095,7 @@ func (a *App) appealRecordInfo(id string) (date, content, names, studentIDs stri
 		WHERE sr.belongs_to = ?
 		ORDER BY sr.id, o.student_id`, id)
 	if queryErr != nil {
-		return "", "", "", "", false, queryErr
+		return "", "", "", "", "", false, queryErr
 	}
 	defer rows.Close()
 	seen := make(map[string]bool)
@@ -1041,7 +1103,7 @@ func (a *App) appealRecordInfo(id string) (date, content, names, studentIDs stri
 	for rows.Next() {
 		var studentID, studentName string
 		if scanErr := rows.Scan(&studentID, &studentName); scanErr != nil {
-			return "", "", "", "", false, scanErr
+			return "", "", "", "", "", false, scanErr
 		}
 		if seen[studentID] {
 			continue
@@ -1051,9 +1113,9 @@ func (a *App) appealRecordInfo(id string) (date, content, names, studentIDs stri
 		nameParts = append(nameParts, studentName)
 	}
 	if err = rows.Err(); err != nil {
-		return "", "", "", "", false, err
+		return "", "", "", "", "", false, err
 	}
-	return date, content, strings.Join(nameParts, ","), strings.Join(idParts, ","), false, nil
+	return date, content, strings.Join(nameParts, ","), strings.Join(idParts, ","), recordLabel, false, nil
 }
 
 func validateAppealImage(data []byte, ext string) error {
@@ -1079,24 +1141,32 @@ func validateAppealImage(data []byte, ext string) error {
 }
 
 type wordAppealConfig struct {
-	DocPath          string            `json:"doc_path"`
-	OutputPath       string            `json:"output_path"`
-	Values           map[string]string `json:"values"`
-	PhotoPaths       []string          `json:"photo_paths"`
-	AppealPhotoPaths []string          `json:"appeal_photo_paths"`
+	DocPath           string            `json:"doc_path"`
+	OutputPath        string            `json:"output_path"`
+	Values            map[string]string `json:"values"`
+	PhotoPaths        []string          `json:"photo_paths"`
+	AppealPhotoPaths  []string          `json:"appeal_photo_paths"`
+	PhotoMarker       string            `json:"photo_marker"`
+	AppealPhotoMarker string            `json:"appeal_photo_marker"`
 }
 
-func fillAppealDoc(template []byte, grade, class, names, date, recordDate, content, textContent string, isSchool bool, photoImages, appealImages []appealImage) ([]byte, error) {
+func fillAppealDoc(template []byte, grade, class, names, studentIDs, date, recordDate, content, textContent string, isSchool bool, photoImages, appealImages []appealImage) ([]byte, error) {
 	values := map[string]string{
 		"<grade>":            grade,
 		"<date>":             date,
 		"<class>":            class,
 		"<student_ids_name>": names,
+		"<student_id>":       studentIDs,
 		"<record_date>":      recordDate,
 		"<record_content>":   content,
 		"<text_content>":     textContent,
 	}
-	return renderAppealDocWithWord(template, values, appealImagePaths(photoImages), appealImagePaths(appealImages))
+	// 大队督察模板用 <photo>/<photo_appeal>，校督模板用 <photo1>/<photo2>。
+	photoMarker, appealPhotoMarker := "<photo>", "<photo_appeal>"
+	if isSchool {
+		photoMarker, appealPhotoMarker = "<photo1>", "<photo2>"
+	}
+	return renderAppealDocWithWord(template, values, appealImagePaths(photoImages), appealImagePaths(appealImages), photoMarker, appealPhotoMarker)
 }
 
 func appealImagePaths(images []appealImage) []string {
@@ -1109,7 +1179,7 @@ func appealImagePaths(images []appealImage) []string {
 	return paths
 }
 
-func renderAppealDocWithWord(template []byte, values map[string]string, photoPaths, appealPhotoPaths []string) ([]byte, error) {
+func renderAppealDocWithWord(template []byte, values map[string]string, photoPaths, appealPhotoPaths []string, photoMarker, appealPhotoMarker string) ([]byte, error) {
 	tempDir, err := os.MkdirTemp("", "appeal_doc_*")
 	if err != nil {
 		return nil, err
@@ -1124,11 +1194,13 @@ func renderAppealDocWithWord(template []byte, values map[string]string, photoPat
 		return nil, err
 	}
 	config := wordAppealConfig{
-		DocPath:          docPath,
-		OutputPath:       outputPath,
-		Values:           values,
-		PhotoPaths:       photoPaths,
-		AppealPhotoPaths: appealPhotoPaths,
+		DocPath:           docPath,
+		OutputPath:        outputPath,
+		Values:            values,
+		PhotoPaths:        photoPaths,
+		AppealPhotoPaths:  appealPhotoPaths,
+		PhotoMarker:       photoMarker,
+		AppealPhotoMarker: appealPhotoMarker,
 	}
 	configData, err := json.Marshal(config)
 	if err != nil {
@@ -1199,6 +1271,9 @@ try {
   }
 
   function Insert-DocImages($doc, [string]$marker, $paths) {
+    if ([string]::IsNullOrWhiteSpace($marker)) {
+      return
+    }
     $range = $doc.Content
     $find = $range.Find
     $find.ClearFormatting()
@@ -1209,8 +1284,9 @@ try {
     if (-not $find.Execute()) {
       return
     }
-    # Max display width: the width of the table cell that the marker sits in
-    # (the filled-in part of the template), falling back to the page text width.
+    # Max display width: the width of the table cell holding the marker. The
+    # photo rows of both templates are merged cells spanning the whole table,
+    # so this is the table width; fall back to the page text width.
     $maxWidth = 0
     if ($range.Information(12) -and $range.Cells.Count -gt 0) {
       $maxWidth = $range.Cells.Item(1).Width
@@ -1221,6 +1297,10 @@ try {
     if ($maxWidth -le 0) {
       $maxWidth = 460
     }
+    # Photos are capped at 90% of the table width. Note: the render.ps1 file is
+    # written without a BOM and is read by Windows PowerShell as ANSI, so this
+    # script must stay ASCII-only.
+    $maxPhotoWidth = $maxWidth * 0.9
     $insert = $range.Duplicate
     $insert.Text = ''
     foreach ($path in @($paths)) {
@@ -1231,13 +1311,13 @@ try {
         continue
       }
       $shape = $doc.InlineShapes.AddPicture($path, $false, $true, $insert)
-      # Scale proportionally: if the picture is wider than the cell, fit it to
-      # below 90% of that width (Word snaps Width to 0.5pt, so subtract 0.5pt
-      # to stay strictly under 90%); height is scaled by the same ratio.
-      if ($shape.Width -gt $maxWidth) {
-        $target = $maxWidth * 0.9 - 0.5
+      # Scale proportionally once the natural width exceeds 90% of the table
+      # width (Word snaps Width to 0.5pt, so subtract another 0.5pt to stay
+      # strictly under the cap); narrower pictures keep their natural size.
+      if ($shape.Width -gt $maxPhotoWidth) {
+        $target = $maxPhotoWidth - 0.5
         if ($target -le 0) {
-          $target = $maxWidth * 0.9
+          $target = $maxPhotoWidth
         }
         $ratio = $target / $shape.Width
         $shape.Width = $target
@@ -1252,8 +1332,8 @@ try {
   foreach ($prop in $cfg.values.PSObject.Properties) {
     Replace-DocText $doc $prop.Name ([string]$prop.Value)
   }
-  Insert-DocImages $doc '<photo>' $cfg.photo_paths
-  Insert-DocImages $doc '<photo_appeal>' $cfg.appeal_photo_paths
+  Insert-DocImages $doc $cfg.photo_marker $cfg.photo_paths
+  Insert-DocImages $doc $cfg.appeal_photo_marker $cfg.appeal_photo_paths
 
   $doc.SaveAs2($cfg.output_path, 0)
   $doc.Close($false)

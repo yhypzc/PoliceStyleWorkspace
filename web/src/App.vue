@@ -4,7 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, clearCSRFToken, csrfHeaders, setCSRFToken } from './api'
 import EmojiText from '../../third_party/art-design-pro/src/utils/ui/emojo'
 
-const page = computed(() => location.pathname.includes('daily-report') ? 'daily-report' : location.pathname.includes('change-password') ? 'password' : location.pathname.includes('daily-management') ? 'daily-management' : location.pathname.includes('report-events') ? 'report-events' : location.pathname.includes('dorms') ? 'dorms' : location.pathname.includes('students') ? 'students' : location.pathname.includes('multi-deductions') ? 'multi-deductions' : location.pathname.includes('deductions') ? 'deductions' : location.pathname.includes('semester') ? 'semester' : location.pathname.includes('workspace') ? 'workspace' : 'login')
+const page = computed(() => location.pathname.includes('monthly-export') ? 'monthly-export' : location.pathname.includes('daily-report') ? 'daily-report' : location.pathname.includes('change-password') ? 'password' : location.pathname.includes('daily-management') ? 'daily-management' : location.pathname.includes('report-events') ? 'report-events' : location.pathname.includes('dorms') ? 'dorms' : location.pathname.includes('students') ? 'students' : location.pathname.includes('multi-deductions') ? 'multi-deductions' : location.pathname.includes('deductions') ? 'deductions' : location.pathname.includes('semester') ? 'semester' : location.pathname.includes('workspace') ? 'workspace' : 'login')
 const busy = ref(false)
 const authReady = ref(false)
 const login = reactive({ username: 'admin', password: '' })
@@ -701,13 +701,37 @@ async function selectDailyWeek(index: number) {
 function formatDailyDate(value: string) { return value.slice(5).replace('-', '/') }
 function closeDailySummary() { dailySummaryVisible.value = false }
 
-type WeekRecords = { single: { id: string; submit_date: string; date: string; student_name: string; content: string; score: number; include_weekly: boolean; student_ids: string[]; student_names: string }[]; multi: { id: string; submit_date: string; date: string; dorm_name: string; content: string; score: number; subs: { sub_id: string; content: string; student_ids: string[]; student_names: string }[] }[] }
+type WeekRecords = { single: { id: string; submit_date: string; date: string; student_name: string; content: string; score: number; include_weekly: boolean; student_ids: string[]; student_names: string; template_saved: boolean }[]; multi: { id: string; submit_date: string; date: string; dorm_name: string; content: string; score: number; template_saved: boolean; subs: { sub_id: string; content: string; student_ids: string[]; student_names: string }[] }[] }
 const weekRecords = ref<WeekRecords>({ single: [], multi: [] })
 const weekRecordsBusy = ref(false)
 const weekBatchSingleIDs = ref<string[]>([])
 const weekBatchMultiIDs = ref<string[]>([])
 const weekBatchExportBusy = ref(false)
 const weekRecordsSearch = ref('')
+// ── 月表导出（学生纪律作风记实考评扣分汇总表，独立页面 /monthly-export）──
+// 起止用两个独立日历，且范围不能倒：起始日历禁选结束日之后，结束日历禁选起始日之前。
+const monthlyExportStart = ref('')
+const monthlyExportEnd = ref('')
+const monthlyExporting = ref(false)
+function monthlyDateTimestamp(value: string) {
+  if (!value) return Number.NaN
+  return new Date(`${value}T00:00:00`).getTime()
+}
+function monthlyStartDisabled(date: Date) {
+  const end = monthlyDateTimestamp(monthlyExportEnd.value)
+  return !Number.isNaN(end) && date.getTime() > end
+}
+function monthlyEndDisabled(date: Date) {
+  const start = monthlyDateTimestamp(monthlyExportStart.value)
+  return !Number.isNaN(start) && date.getTime() < start
+}
+// 改动一端后，另一端若已越界就清空，避免留下「起始晚于结束」的死状态
+watch(monthlyExportStart, value => {
+  if (value && monthlyExportEnd.value && monthlyExportEnd.value < value) monthlyExportEnd.value = ''
+})
+watch(monthlyExportEnd, value => {
+  if (value && monthlyExportStart.value && monthlyExportStart.value > value) monthlyExportStart.value = ''
+})
 const filteredWeekSingle = computed(() => {
   const kw = weekRecordsSearch.value.trim().toLowerCase()
   if (!kw) return weekRecords.value.single
@@ -773,6 +797,44 @@ function toggleAllWeekSingle(checked: boolean) {
 }
 function toggleAllWeekMulti(checked: boolean) {
   weekBatchMultiIDs.value = checked ? filteredWeekMulti.value.map(row => row.id) : []
+}
+async function exportMonthlySummary() {
+  const start = monthlyExportStart.value
+  const end = monthlyExportEnd.value
+  if (!start || !end) {
+    ElMessage.warning('请选择起始日期和结束日期')
+    return
+  }
+  if (end < start) {
+    ElMessage.warning('结束日期不能早于起始日期')
+    return
+  }
+  monthlyExporting.value = true
+  try {
+    const params = new URLSearchParams({ start, end })
+    const response = await fetch('/api/monthly-summary/export?' + params.toString(), { credentials: 'same-origin' })
+    if (!response.ok) {
+      const text = await response.text()
+      let message = text
+      try { message = JSON.parse(text).error || text } catch {}
+      throw new Error(message || `月表导出失败 (${response.status})`)
+    }
+    const blob = await response.blob()
+    const cd = response.headers.get('content-disposition') || ''
+    const matched = cd.match(/filename\*=UTF-8''([^;]+)/)
+    const name = matched ? decodeURIComponent(matched[1]) : '学生纪律作风记实考评扣分汇总表.xlsx'
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name
+    link.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('月表导出已完成')
+  } catch (error: any) {
+    ElMessage.error(error.message || '月表导出失败')
+  } finally {
+    monthlyExporting.value = false
+  }
 }
 async function batchExportWeekAppeals() {
   const single = [...weekBatchSingleIDs.value]
@@ -1483,12 +1545,12 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
   <div v-else-if="authReady" class="layout-shell">
     <aside class="layout-sidebar">
       <div class="sidebar-brand"><img src="/icon.png" alt="" style="width:50px;height:50px;object-fit:contain" /><strong>纪检工作台</strong></div>
-      <nav><a :class="{ active: page === 'workspace' }" href="/workspace">工作台</a><a :class="{ active: page === 'daily-management' }" href="/daily-management">日常综合管理</a><a :class="{ active: page === 'dorms' }" href="/dorms">寝室管理</a><a :class="{ active: page === 'semester' }" href="/semester">学期管理</a><a :class="{ active: page === 'students' }" href="/students">学生管理</a><a :class="{ active: page === 'deductions' }" href="/deductions">常规扣分记录管理</a><a :class="{ active: page === 'multi-deductions' }" href="/multi-deductions">寝室整体差扣分记录管理</a><a :class="{ active: page === 'daily-report' }" href="/daily-report">警务化管理每日播报</a><a :class="{ active: page === 'report-events' }" href="/report-events">定时通知管理</a><a :class="{ active: page === 'password' }" href="/change-password">修改密码</a></nav>
+      <nav><a :class="{ active: page === 'workspace' }" href="/workspace">工作台</a><a :class="{ active: page === 'daily-management' }" href="/daily-management">日常综合管理</a><a :class="{ active: page === 'monthly-export' }" href="/monthly-export">月表导出</a><a :class="{ active: page === 'dorms' }" href="/dorms">寝室管理</a><a :class="{ active: page === 'semester' }" href="/semester">学期管理</a><a :class="{ active: page === 'students' }" href="/students">学生管理</a><a :class="{ active: page === 'deductions' }" href="/deductions">常规扣分记录管理</a><a :class="{ active: page === 'multi-deductions' }" href="/multi-deductions">寝室整体差扣分记录管理</a><a :class="{ active: page === 'daily-report' }" href="/daily-report">警务化管理每日播报</a><a :class="{ active: page === 'report-events' }" href="/report-events">定时通知管理</a><a :class="{ active: page === 'password' }" href="/change-password">修改密码</a></nav>
       <div class="sidebar-spacer"></div>
       <ElButton class="sidebar-logout" text @click="logout">退出登录</ElButton>
     </aside>
     <div class="layout-main">
-      <header class="top-bar"><strong>{{ page === 'daily-report' ? '警务化管理每日播报' : page === 'report-events' ? '定时通知管理' : page === 'password' ? '修改密码' : page === 'daily-management' ? '日常综合管理' : page === 'dorms' ? '寝室管理' : page === 'students' ? '学生管理' : page === 'deductions' ? '常规扣分记录管理' : page === 'multi-deductions' ? '寝室整体差扣分记录管理' : page === 'semester' ? '学期管理' : '工作台' }}</strong><time class="top-bar-clock">{{ currentTimeText }}</time></header>
+      <header class="top-bar"><strong>{{ page === 'daily-report' ? '警务化管理每日播报' : page === 'report-events' ? '定时通知管理' : page === 'password' ? '修改密码' : page === 'daily-management' ? '日常综合管理' : page === 'monthly-export' ? '月表导出' : page === 'dorms' ? '寝室管理' : page === 'students' ? '学生管理' : page === 'deductions' ? '常规扣分记录管理' : page === 'multi-deductions' ? '寝室整体差扣分记录管理' : page === 'semester' ? '学期管理' : '工作台' }}</strong><time class="top-bar-clock">{{ currentTimeText }}</time></header>
       <main class="page-area">
         <!-- 申诉模板导出弹窗：所有页面共享（常规扣分/整体差/日常管理等操作列均可打开） -->
         <ElDialog v-model="appealDialogVisible" :title="appealIsSchool ? '校督申诉模板导出' : '大队督察申诉模板导出'" width="620px" @close="appealRecord = null">
@@ -1500,40 +1562,30 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
               <ElFormItem label="大队"><ElInput v-model="appealGrade" placeholder="大队" /></ElFormItem>
               <ElFormItem label="区队"><ElInput v-model="appealClass" placeholder="区队" /></ElFormItem>
               <ElFormItem label="学生复议情况说明"><ElInput v-model="appealText" type="textarea" :rows="3" placeholder="请填写复议情况说明" /></ElFormItem>
-              <template v-if="!appealIsSchool">
-                <ElFormItem label="大督扣分照片">
-                  <div class="appeal-photo-grid">
-                    <div v-for="(p,i) in appealDdPhotos" :key="p" class="appeal-photo-card">
-                      <ElImage :src="appealPhotoUrl(p)" fit="cover" :preview-src-list="appealDdPhotos.map(appealPhotoUrl)" :initial-index="i" preview-teleported class="appeal-photo-thumb" />
-                      <div class="appeal-photo-name" :title="p">{{ p }}</div>
-                      <ElButton text type="danger" size="small" class="appeal-photo-del" @click="deleteAppealPhoto(p, 'dd')">×</ElButton>
-                    </div>
+              <!-- 大队督察与校督使用同一套上传方式（两个上传入口）：
+                   校督第一个入口是「扣分项目截图和扣分照片」→ <photo1>，
+                   第二个入口是「证据照片」→ <photo2>；
+                   大队督察对应 <photo>（大督扣分照片）与 <photo_appeal>（申诉照片）。 -->
+              <ElFormItem :label="appealIsSchool ? '扣分项目截图和扣分照片' : '大督扣分照片'">
+                <div class="appeal-photo-grid">
+                  <div v-for="(p,i) in appealDdPhotos" :key="p" class="appeal-photo-card">
+                    <ElImage :src="appealPhotoUrl(p)" fit="cover" :preview-src-list="appealDdPhotos.map(appealPhotoUrl)" :initial-index="i" preview-teleported class="appeal-photo-thumb" />
+                    <div class="appeal-photo-name" :title="p">{{ p }}</div>
+                    <ElButton text type="danger" size="small" class="appeal-photo-del" @click="deleteAppealPhoto(p, 'dd')">×</ElButton>
                   </div>
-                  <ElButton size="small" @click="uploadAppealPhoto('dd')">上传照片</ElButton>
-                </ElFormItem>
-                <ElFormItem label="申诉照片">
-                  <div class="appeal-photo-grid">
-                    <div v-for="(p,i) in appealAppealPhotos" :key="p" class="appeal-photo-card">
-                      <ElImage :src="appealPhotoUrl(p)" fit="cover" :preview-src-list="appealAppealPhotos.map(appealPhotoUrl)" :initial-index="i" preview-teleported class="appeal-photo-thumb" />
-                      <div class="appeal-photo-name" :title="p">{{ p }}</div>
-                      <ElButton text type="danger" size="small" class="appeal-photo-del" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton>
-                    </div>
+                </div>
+                <ElButton size="small" @click="uploadAppealPhoto('dd')">上传照片</ElButton>
+              </ElFormItem>
+              <ElFormItem :label="appealIsSchool ? '证据照片' : '申诉照片'">
+                <div class="appeal-photo-grid">
+                  <div v-for="(p,i) in appealAppealPhotos" :key="p" class="appeal-photo-card">
+                    <ElImage :src="appealPhotoUrl(p)" fit="cover" :preview-src-list="appealAppealPhotos.map(appealPhotoUrl)" :initial-index="i" preview-teleported class="appeal-photo-thumb" />
+                    <div class="appeal-photo-name" :title="p">{{ p }}</div>
+                    <ElButton text type="danger" size="small" class="appeal-photo-del" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton>
                   </div>
-                  <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
-                </ElFormItem>
-              </template>
-              <template v-else>
-                <ElFormItem label="申诉照片">
-                  <div class="appeal-photo-grid">
-                    <div v-for="(p,i) in appealAppealPhotos" :key="p" class="appeal-photo-card">
-                      <ElImage :src="appealPhotoUrl(p)" fit="cover" :preview-src-list="appealAppealPhotos.map(appealPhotoUrl)" :initial-index="i" preview-teleported class="appeal-photo-thumb" />
-                      <div class="appeal-photo-name" :title="p">{{ p }}</div>
-                      <ElButton text type="danger" size="small" class="appeal-photo-del" @click="deleteAppealPhoto(p, 'appeal')">×</ElButton>
-                    </div>
-                  </div>
-                  <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
-                </ElFormItem>
-              </template>
+                </div>
+                <ElButton size="small" @click="uploadAppealPhoto('appeal')">上传照片</ElButton>
+              </ElFormItem>
             </ElForm>
             <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">
               <ElButton @click="appealDialogVisible = false">取消</ElButton>
@@ -1717,6 +1769,19 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
             </template>
           </ElDialog>
         </section>
+        <section v-else-if="page === 'monthly-export'" class="page-content art-card monthly-export-page">
+          <h2 class="semester-title">月表导出</h2>
+          <p class="daily-detail-date">按日期范围生成《学生纪律作风记实考评扣分汇总表》</p>
+          <ElForm label-position="top" style="max-width:560px;margin-top:20px">
+            <ElFormItem label="起始日期">
+              <ElDatePicker v-model="monthlyExportStart" type="date" value-format="YYYY-MM-DD" placeholder="选择起始日期" :disabled-date="monthlyStartDisabled" style="width:100%" />
+            </ElFormItem>
+            <ElFormItem label="结束日期">
+              <ElDatePicker v-model="monthlyExportEnd" type="date" value-format="YYYY-MM-DD" placeholder="选择结束日期" :disabled-date="monthlyEndDisabled" style="width:100%" />
+            </ElFormItem>
+          </ElForm>
+          <ElButton type="primary" size="large" :loading="monthlyExporting" :disabled="monthlyExporting" @click="exportMonthlySummary()">{{ monthlyExporting ? '正在生成...' : '导出月表' }}</ElButton>
+        </section>
         <section v-else-if="page === 'daily-management'" class="page-content daily-management-page">
           <template v-if="!dailyManagementSemester">
             <div class="workspace-heading"><div><h1>日常综合管理</h1><p>选择学期进入对应的日常管理内容</p></div></div>
@@ -1731,6 +1796,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
   <ElInput v-model="weekRecordsSearch" placeholder="搜索记录ID、日期、扣分项目、分数或学生姓名" clearable style="width:320px;margin-bottom:12px" />
   <h3 style="margin-top:0">常规扣分项目</h3>
   <ElTable :data="filteredWeekSingle" border stripe style="width:100%;margin-bottom:18px">
+    <ElTableColumn label="申诉模板" width="92" align="center"><template #default="{ row }"><ElTag v-if="row.template_saved" size="small" type="success" effect="plain">已保存</ElTag></template></ElTableColumn>
     <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="filteredWeekSingle.length > 0 && weekBatchSingleIDs.length === filteredWeekSingle.length" :indeterminate="weekBatchSingleIDs.length > 0 && weekBatchSingleIDs.length < filteredWeekSingle.length" @change="value => toggleAllWeekSingle(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchSingleIDs.includes(row.id)" @change="value => toggleWeekSingle(row.id, Boolean(value))" /></template></ElTableColumn>
     <ElTableColumn prop="id" label="记录ID" width="140" />
     <ElTableColumn prop="date" label="日期" width="110" />
@@ -1741,6 +1807,7 @@ async function deleteMultiSubrecord(subrecord: MultiSubrecord) {
       </ElTable>
   <h3>寝室整体差扣分项目</h3>
   <ElTable :data="filteredWeekMulti" border stripe style="width:100%">
+    <ElTableColumn label="申诉模板" width="92" align="center"><template #default="{ row }"><ElTag v-if="row.template_saved" size="small" type="success" effect="plain">已保存</ElTag></template></ElTableColumn>
     <ElTableColumn width="52" align="center"><template #header><ElCheckbox :model-value="filteredWeekMulti.length > 0 && weekBatchMultiIDs.length === filteredWeekMulti.length" :indeterminate="weekBatchMultiIDs.length > 0 && weekBatchMultiIDs.length < filteredWeekMulti.length" @change="value => toggleAllWeekMulti(Boolean(value))" /></template><template #default="{ row }"><ElCheckbox :model-value="weekBatchMultiIDs.includes(row.id)" @change="value => toggleWeekMulti(row.id, Boolean(value))" /></template></ElTableColumn>
     <ElTableColumn type="expand">
       <template #default="{ row }">

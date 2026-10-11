@@ -129,3 +129,17 @@ body { color: #20242c; background: var(--default-bg-color); font-family: Inter, 
   justify-content: flex-start;
 }
 .sidebar-logout:hover { color: #f56c6c !important; }
+
+/* ── 月表导出页 ── */
+.monthly-export-page { max-width: 720px; }
+.monthly-export-hint {
+  margin: 4px 0 22px;
+  padding: 14px 18px;
+  border-radius: 8px;
+  background: var(--art-gray-100, #f5f7fa);
+  color: #657084;
+  font-size: 13px;
+  line-height: 1.9;
+}
+.monthly-export-hint p { margin: 0; }
+.monthly-export-hint code { background: #eef1f6; padding: 1px 5px; border-radius: 3px; }

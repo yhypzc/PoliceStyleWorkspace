@@ -29,9 +29,10 @@ var (
 )
 
 // 行内的时间关键词。识别时取"出现位置最靠前"的那个；同一位置优先更长的
-// （晚点名前 要先于 晚点名）。
+// （晚点名前 要先于 晚点名，早一集合 要先于 早一）。
 var inspectionTimeKeywords = []string{
-	"晚点名前", "晚点名", "上午", "早操", "早一", "早二", "下午", "中午", "傍晚", "晚上",
+	"晚点名前", "晚点名", "早一集合", "早二集合", "中午带开",
+	"上午", "早操", "早一", "早二", "下午", "中午", "傍晚", "晚上",
 }
 
 // inspectionGroupColumns 是三个检查组在表头里的名字，顺序即优先级。
@@ -294,9 +295,16 @@ func splitInspectionItem(raw string, students []models.Student, squad string) (s
 		}
 	}
 
-	index, _ := firstInspectionKeyword(line)
+	index, length := firstInspectionKeyword(line)
 	switch {
 	case index == 0:
+		// 时间关键词写在最前面：「早二 蒋子震 腰带挂置不规范」。关键词后面能认出
+		// 学生姓名时把姓名拆出来、时间挪到扣分项目开头，得到与「蒋子震 早二
+		// 腰带挂置不规范」完全相同的记录；认不出就维持原行为，整行记到区队名下
+		// （「早二 包干区窗槽脏」这类本来就没有归属人）。
+		if name, item := splitTimeFirstItem(line, length, students); name != "" {
+			return name, item
+		}
 		return squad, line
 	case index > 0:
 		prefix := trimInspectionName(line[:index])
@@ -333,6 +341,36 @@ func firstInspectionKeyword(line string) (int, int) {
 		}
 	}
 	return bestIndex, bestLength
+}
+
+// splitTimeFirstItem 处理「时间关键词写在行首」的写法：把关键词后面的学生姓名拆
+// 出来，时间关键词挪到扣分项目开头，于是「早二 蒋子震 腰带挂置不规范」与
+// 「蒋子震 早二 腰带挂置不规范」得到完全相同的记录。姓名与项目连写（「早二
+// 陈子凡枕头套放反了」）也能靠 HasPrefix 拆开。
+//
+// 只有能在 students 表里认出姓名、且姓名后面还有扣分项目时才返回；name 为空表示
+// 认不出，调用方维持「整行记到区队名下」的原行为 —— 「早二 包干区窗槽脏」这类
+// 本来就没有归属人的条目正是靠这个兜底，才不会把「包干区」误当姓名。
+func splitTimeFirstItem(line string, keywordLength int, students []models.Student) (string, string) {
+	if keywordLength <= 0 || keywordLength >= len(line) {
+		return "", ""
+	}
+	keyword := line[:keywordLength]
+	rest := strings.TrimSpace(line[keywordLength:])
+	if rest == "" {
+		return "", ""
+	}
+	for _, student := range students {
+		if student.Name == "" || !strings.HasPrefix(rest, student.Name) {
+			continue
+		}
+		item := strings.TrimSpace(rest[len(student.Name):])
+		if item == "" {
+			continue
+		}
+		return student.Name, keyword + " " + item
+	}
+	return "", ""
 }
 
 // matchStudentNameInText 在片段里找学生姓名，取最长的那个（用于「10003孙七」这种

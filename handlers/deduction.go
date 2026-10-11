@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -363,6 +364,13 @@ func (a *App) persistDeductionRows(rows []parsedDeductionRow, errs []string, ski
 // violation. The title supplies the date (current year), the 时间 column
 // (上午/下午) supplies the clock, and only rows whose 区队 equals the configured
 // squadron are returned. ok=false means the workbook is not in this layout.
+//
+// Two shapes of this workbook exist:
+//
+//  1. 姓名 / 时间 / 轻微违纪违规行为 是三列独立填写（原版式）；
+//  2. 三列被合并成一格，整条「姓名 时间 扣分项目」写在「姓名」列里，另两列全空
+//     （如《警务化管理扣分表（9月29日）.xlsx》）。这类行交给 splitInspectionItem
+//     拆分；因为时间列本来就是空的，时分秒落到“导入时的当前时刻”。
 func (a *App) parseMassNoticeRows(rows [][]string) ([]parsedDeductionRow, []string, bool) {
 	titleRow, month, day := findMassNoticeTitle(rows)
 	if titleRow < 0 {
@@ -381,6 +389,15 @@ func (a *App) parseMassNoticeRows(rows [][]string) ([]parsedDeductionRow, []stri
 		return nil, []string{"未配置区队名称，请先在「工作台 → 区队」中设置"}, true
 	}
 
+	students, err := models.ListStudents(a.DB)
+	if err != nil {
+		return nil, []string{err.Error()}, true
+	}
+	// 姓名匹配要长的优先：否则「张三丰」会被「张三」先匹配掉
+	sort.SliceStable(students, func(i, j int) bool {
+		return len([]rune(students[i].Name)) > len([]rune(students[j].Name))
+	})
+
 	now := time.Now()
 	datePrefix := fmt.Sprintf("%04d-%02d-%02d", now.Year(), month, day)
 	// 程序判定时间段：当前时刻在 12 点前为上午，否则为下午。
@@ -391,6 +408,9 @@ func (a *App) parseMassNoticeRows(rows [][]string) ([]parsedDeductionRow, []stri
 	currentClock := now.Format("15:04:05")
 
 	parsed := make([]parsedDeductionRow, 0, len(rows))
+	// 同一张表里完全相同的条目只导一次：合并单元格版式下所有行的时分秒都取
+	// 导入时刻，重复条目会生成同一个记录 ID 而报重复。
+	seen := make(map[string]struct{})
 	squadSeen := false
 	currentSquad := ""
 	for i := headerRow + 1; i < len(rows); i++ {
@@ -408,9 +428,34 @@ func (a *App) parseMassNoticeRows(rows [][]string) ([]parsedDeductionRow, []stri
 		if currentSquad == squad {
 			squadSeen = true
 		}
+		if currentSquad != squad {
+			continue
+		}
 		name := get(nameCol)
 		content := get(contentCol)
-		if name == "" || content == "" || currentSquad != squad {
+		if content == "" {
+			// 合并单元格版式：「姓名 / 时间 / 轻微违纪违规行为」三列并成一格，
+			// 整条写在「姓名」列里（如「厉芷伊 中午 枕头摆放不规范」「早二 蒋子震
+			// 腰带挂置不规范」「早二包干区有垃圾」）。少数表把整条写进了「时间」
+			// 列且该行没有合并（姓名列为空），这时退到「时间」列。复用《日常检查
+			// 表》那套拆分器，姓名认不出来就原样记下，后续按未认定入库；时间列
+			// 本来就是空的，所以时分秒自然落到“导入时的当前时刻”。
+			raw := name
+			if raw == "" {
+				raw = massNoticeCombinedCell(get(timeCol))
+			}
+			if raw == "" {
+				continue
+			}
+			splitName, splitItem := splitInspectionItem(raw, students, squad)
+			// 只认可真正拆分过的单元格：普通通报表里「姓名有值、行为为空」的
+			// 残缺行不能被当成一条内容等于姓名的记录。
+			if splitName != squad && strings.TrimSpace(splitItem) == raw {
+				continue
+			}
+			name, content = splitName, splitItem
+		}
+		if name == "" || content == "" {
 			continue
 		}
 		// 与程序判定时间段一致时取当前时刻，否则上午 08:00:00 / 下午 18:00:00
@@ -428,6 +473,11 @@ func (a *App) parseMassNoticeRows(rows [][]string) ([]parsedDeductionRow, []stri
 		if scoreStr := get(scoreCol); scoreStr != "" {
 			fmt.Sscanf(scoreStr, "%f", &score)
 		}
+		key := name + "\x1f" + content + "\x1f" + fmt.Sprintf("%g", score)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
 		parsed = append(parsed, parsedDeductionRow{
 			RowNumber:   i + 1,
 			SubmitDate:  datePrefix + " " + clock,
@@ -500,6 +550,21 @@ func findMassNoticeHeader(rows [][]string, titleRow int) (headerRow, squadCol, n
 func isDeductionDuplicateError(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unique constraint") || strings.Contains(msg, "已存在")
+}
+
+// massNoticeCombinedCell 判断「时间」列里写的是不是一个孤立的时间段。合并单元格
+// 版式的表格偶尔会把整条扣分内容写进「时间」列（那一行的 C:E 合并也丢了、姓名列
+// 为空），这时要把整格当成条目来处理；但「时间」列本来只写「上午/下午」这类孤立
+// 时间段，整格恰好就是一个时间关键词时不能当成条目。
+func massNoticeCombinedCell(value string) string {
+	value = normalizeExcelHeader(value)
+	if value == "" {
+		return ""
+	}
+	if index, length := firstInspectionKeyword(value); index == 0 && strings.TrimSpace(value[length:]) == "" {
+		return ""
+	}
+	return value
 }
 
 var monthDayPattern = regexp.MustCompile(`^(\d{1,2})\.(\d{1,2})$`)

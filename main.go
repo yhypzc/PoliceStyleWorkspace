@@ -94,6 +94,9 @@ func main() {
 	mux.HandleFunc("GET /daily-management", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, staticFS, "daily-management.html")
 	})
+	mux.HandleFunc("GET /monthly-export", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, staticFS, "monthly-export.html")
+	})
 	mux.HandleFunc("GET /daily-report", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, staticFS, "workspace.html")
 	})
@@ -127,6 +130,7 @@ func main() {
 	mux.Handle("GET /api/appeal/export-zip", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ExportAppealZip)))
 	mux.Handle("POST /api/appeal/batch-export", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.BatchExportAppealZip)))
 	mux.Handle("GET /api/daily-management/{name}/summary/export", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ExportDailyManagementSummary)))
+	mux.Handle("GET /api/monthly-summary/export", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ExportMonthlySummary)))
 	mux.Handle("GET /api/daily-report/config", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.GetDailyReportConfig)))
 	mux.Handle("PUT /api/daily-report/config", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.SaveDailyReportConfig)))
 	mux.Handle("GET /api/daily-report/robots", middleware.RequireAuth(sessionStore, http.HandlerFunc(app.ListDingTalkRobots)))
@@ -368,6 +372,10 @@ func spaHandler(staticFS fs.FS) http.HandlerFunc {
 		}
 		if path == "/daily-management" {
 			http.ServeFileFS(w, r, staticFS, "daily-management.html")
+			return
+		}
+		if path == "/monthly-export" {
+			http.ServeFileFS(w, r, staticFS, "monthly-export.html")
 			return
 		}
 		if path == "/report-events" {

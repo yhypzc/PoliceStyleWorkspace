@@ -21,6 +21,7 @@ export default defineConfig({
 		semester: resolve(__dirname, 'semester.html'),
 		dorms: resolve(__dirname, 'dorms.html'),
 		'daily-management': resolve(__dirname, 'daily-management.html'),
+		'monthly-export': resolve(__dirname, 'monthly-export.html'),
         students: resolve(__dirname, 'students.html'),
         deductions: resolve(__dirname, 'deductions.html'),
         'multi-deductions': resolve(__dirname, 'multi-deductions.html'),

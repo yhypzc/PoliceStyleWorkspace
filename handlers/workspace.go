@@ -961,6 +961,10 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 		names[s.ID] = s.Name
 	}
 
+	// 申诉模板库：本周条目里「申诉情况说明」确实写了内容的，前端才在最左列
+	// 显示「已保存」标记（只有照片、或批量导出自动建的空条目都不算）。
+	store := a.appealStore()
+
 	// 查询常规扣分记录
 	type singleRecord struct {
 		ID            string   `json:"id"`
@@ -972,6 +976,9 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 		IncludeWeekly bool     `json:"include_weekly"`
 		StudentIDs    []string `json:"student_ids"`
 		StudentNames  string   `json:"student_names"`
+		// TemplateSaved 表示这条记录的「申诉情况说明」已经写了内容，前端在最左
+		// 列显示「已保存」标记；只有照片、或批量导出自动建的空条目都不算。
+		TemplateSaved bool `json:"template_saved"`
 	}
 	// 查询常规扣分记录。必须用 LEFT JOIN：未认定（没有任何认定学生）的记录也要
 	// 出现在本周扣分条目里，INNER JOIN 会把它们整条丢掉。没有归属时
@@ -1005,10 +1012,12 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 		if idsStr == "" {
 			studentIDs = nil
 		}
+		record, found := store.getRecord(appealRecordIDFromKey(id))
 		singleRecords = append(singleRecords, singleRecord{
 			ID: id, SubmitDate: date, Date: date[:10], StudentName: studentName,
 			Content: content, Score: score, IncludeWeekly: includeWeekly != 0,
 			StudentIDs: studentIDs, StudentNames: studentNames,
+			TemplateSaved: appealTemplateSaved(record, found),
 		})
 	}
 
@@ -1027,6 +1036,8 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 		Content    string           `json:"content"`
 		Score      float64          `json:"score"`
 		Subs       []multiSubRecord `json:"subs"`
+		// TemplateSaved 同 singleRecord：申诉情况说明有内容才为 true。
+		TemplateSaved bool `json:"template_saved"`
 	}
 	multiRows, err := a.DB.Query(`
 		SELECT r.id, r.submit_date, r.dorm_name, r.content, r.score
@@ -1048,7 +1059,8 @@ func (a *App) DailyManagementWeekRecords(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusInternalServerError, "读取寝室整体差记录失败: "+err.Error())
 			return
 		}
-		multiMap[id] = &multiRecord{ID: id, SubmitDate: date, Date: date[:10], DormName: dormName, Content: content, Score: score}
+		record, found := store.getRecord(appealRecordIDFromKey(id))
+		multiMap[id] = &multiRecord{ID: id, SubmitDate: date, Date: date[:10], DormName: dormName, Content: content, Score: score, TemplateSaved: appealTemplateSaved(record, found)}
 		multiOrder = append(multiOrder, id)
 	}
 
